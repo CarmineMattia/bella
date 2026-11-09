@@ -467,6 +467,7 @@ fn public_payload(payload: &mut Value) {
         payload["profile"]["model"] = json!("");
         if let Some(profile) = payload["profile"].as_object_mut() {
             profile.remove("lend_chat");
+            profile.remove("lend_per_hour");
         }
     }
 }
@@ -523,6 +524,7 @@ fn apply(store: &Store, data: &Value, user_id: &str) -> Result<()> {
                 // Model instructions and the lending opt-in remain on the device. Only public
                 // presentation is shared; a remote event can never enable lending.
                 p.lend_chat = false;
+                p.lend_per_hour = profiles::DELEGATE_PER_HOUR;
                 if let Ok(old) = tx.query_row(
                     "SELECT data FROM profiles WHERE owner=?1 AND handle=?2",
                     params![p.owner, p.handle],
@@ -532,6 +534,7 @@ fn apply(store: &Store, data: &Value, user_id: &str) -> Result<()> {
                     p.instructions = old.instructions;
                     p.model = old.model;
                     p.lend_chat = old.lend_chat;
+                    p.lend_per_hour = old.lend_per_hour;
                 }
                 profiles::save(&tx, &p)?;
             }
@@ -732,6 +735,7 @@ mod tests {
         )?)?;
         public_payload(&mut outgoing);
         assert!(outgoing["profile"].get("lend_chat").is_none());
+        assert!(outgoing["profile"].get("lend_per_hour").is_none());
         assert_eq!(outgoing["profile"]["instructions"], "");
         store
             .connection()

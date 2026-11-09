@@ -24,7 +24,7 @@
 - Personal chats always address a bot; disabled or unavailable named bots preserve the draft and require choosing another recipient. Incoming messages never change your recipient or invoke an agent.
 - Bot lending, chat only, as a first partial step of owner/delegate policies. It is opt-in per bot through *Lend for chat* in the F8 form and off by default. The setting stays on the device and never syncs. When another account in a shared group starts a message with `@handle`, the owner's online client answers with the owner's model and instructions.
 - Guest requests carry no tool definitions and get a separate system prompt. Any returned tool call is refused without approval or execution. Context is limited to that group's history up to the request.
-- Each guest gets 5 started requests per bot per hour. Guest requests are handled one at a time, with no queue. Bot authors, own messages, stale backlog and duplicate messages are ignored.
+- Each guest gets a per-bot number of started requests per hour, set in the F8 form (*Guest requests per person per hour*, 1–60, default 5, device-local and never synced). Guest requests are handled one at a time, with no queue. Bot authors, own messages, stale backlog and duplicate messages are ignored.
 - Tasks record the requester through an additive `agent_tasks.requester` migration. F5 shows delegated requests and who asked. Failures post only a generic note to the group.
 - No end-to-end encryption: the hub administrator can read guest requests and replies.
 

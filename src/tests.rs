@@ -1217,16 +1217,20 @@ fn bot_form_lend_flag_defaults_off_and_rejects_ambiguous_values() -> Result<()> 
     let mut a = app()?;
     a.open_dialog(Dialog::Bots);
     a.dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
-    assert_eq!(a.profile_form.as_ref().unwrap().fields[6].1.text, "no");
-    form_values(&mut a, &["planner", "Planner", "", "", "", "", "maybe"]);
+    assert_eq!(a.profile_form.as_ref().unwrap().fields[6].1.text, "5");
+    assert_eq!(a.profile_form.as_ref().unwrap().fields[7].1.text, "no");
+    form_values(
+        &mut a,
+        &["planner", "Planner", "", "", "", "", "5", "maybe"],
+    );
     a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
     assert!(a.profile_form.as_ref().unwrap().error.contains("yes or no"));
-    form_values(&mut a, &["planner", "Planner", "", "", "", "", "no"]);
+    form_values(&mut a, &["planner", "Planner", "", "", "", "", "5", "no"]);
     a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
     assert!(!a.requested_bot("@planner").unwrap().lend_chat);
     a.selected = a.bots().iter().position(|p| p.handle == "planner").unwrap();
     a.dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))?;
-    a.profile_form.as_mut().unwrap().fields[6].1 = Editor::new("yes".into());
+    a.profile_form.as_mut().unwrap().fields[7].1 = Editor::new("yes".into());
     a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
     let planner = a.requested_bot("@planner").unwrap();
     assert!(planner.lend_chat);
@@ -1701,5 +1705,53 @@ fn copy_hitboxes_follow_resize_and_do_not_overlap_details_or_latest_overlay() ->
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn bot_form_guest_quota_is_bounded_and_per_bot() -> Result<()> {
+    let mut a = app()?;
+    a.open_dialog(Dialog::Bots);
+    a.dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
+    for bad in ["0", "61", "-1", "two", "1.5", ""] {
+        form_values(&mut a, &["planner", "Planner", "", "", "", "", bad, "yes"]);
+        a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+        assert!(
+            a.profile_form.as_ref().unwrap().error.contains("1 to 60"),
+            "accepted quota {bad:?}"
+        );
+    }
+    form_values(&mut a, &["planner", "Planner", "", "", "", "", "2", "yes"]);
+    a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    let planner = a.requested_bot("@planner").unwrap();
+    assert_eq!(planner.lend_per_hour, 2);
+    // Profiles saved before this field existed fall back to the default.
+    let mut json = serde_json::to_value(&planner)?;
+    json.as_object_mut().unwrap().remove("lend_per_hour");
+    let old: profiles::Profile = serde_json::from_value(json)?;
+    assert_eq!(old.lend_per_hour, profiles::DELEGATE_PER_HOUR);
+    Ok(())
+}
+#[test]
+fn delegated_quota_uses_the_bots_own_limit() -> Result<()> {
+    let mut a = networked(Store::open(std::path::Path::new(":memory:"))?)?;
+    a.config.endpoint = "http://127.0.0.1:9/v1".into();
+    let mut bot = lendable_planner(&mut a, true)?;
+    bot.lend_per_hour = 1;
+    profiles::save(a.store.connection(), &bot)?;
+    a.refresh()?;
+    a.store.connection().execute(
+        "INSERT INTO delegate_requests(message_id,owner,handle,requester,room,outcome) VALUES(-1,'alice','planner','bob','workshop','started')",
+        [],
+    )?;
+    a.store.add("workshop", "bob", "@planner again", "human")?;
+    let over = last_message_id(&a)?;
+    a.poll_delegated()?;
+    assert!(
+        a.job.is_none(),
+        "Request over the bot's own limit reached the model"
+    );
+    assert_eq!(delegate_outcome(&a, over).as_deref(), Some("quota"));
+    assert!(a.status.contains("limit of 1"));
     Ok(())
 }

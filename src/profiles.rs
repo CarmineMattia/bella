@@ -18,9 +18,18 @@ pub struct Profile {
     /// Device-local like instructions; never synchronised or accepted from the hub.
     #[serde(default)]
     pub lend_chat: bool,
+    /// Started guest requests allowed per requester, for this bot, in a rolling hour.
+    /// Device-local like `lend_chat`; old profiles without it get the default.
+    #[serde(default = "default_lend_per_hour")]
+    pub lend_per_hour: i64,
 }
-/// Delegated (guest) requests allowed per requester, per bot, in a rolling hour.
+/// Default guest requests per requester, per bot, in a rolling hour.
 pub const DELEGATE_PER_HOUR: i64 = 5;
+/// Upper bound the owner can set for guest requests per hour.
+pub const DELEGATE_PER_HOUR_MAX: i64 = 60;
+fn default_lend_per_hour() -> i64 {
+    DELEGATE_PER_HOUR
+}
 impl Profile {
     pub fn user(owner: &str) -> Self {
         Self {
@@ -32,6 +41,7 @@ impl Profile {
             model: String::new(),
             avatar: vec![],
             lend_chat: false,
+            lend_per_hour: DELEGATE_PER_HOUR,
         }
     }
     pub fn bot(owner: &str, handle: &str) -> Self {
@@ -69,6 +79,9 @@ impl Profile {
         }
         if self.model.chars().count() > 200 || self.model.chars().any(char::is_control) {
             bail!("Model: at most 200 printable characters");
+        }
+        if !(1..=DELEGATE_PER_HOUR_MAX).contains(&self.lend_per_hour) {
+            bail!("Guest requests per hour: a whole number from 1 to {DELEGATE_PER_HOUR_MAX}");
         }
         if !self.avatar.is_empty() && self.avatar.len() != 24 * 24 {
             bail!("Invalid picture data");
@@ -198,6 +211,10 @@ impl Form {
                 ("Model (blank inherits default)", p.model.clone()),
                 ("Picture: PNG/JPEG path", String::new()),
                 (
+                    "Guest requests per person per hour when lent (1–60)",
+                    p.lend_per_hour.to_string(),
+                ),
+                (
                     "Lend for chat to group members: yes/no (guests never get tools)",
                     if p.lend_chat { "yes" } else { "no" }.into(),
                 ),
@@ -234,7 +251,13 @@ impl Form {
             p.about = value(2);
             p.instructions = value(3);
             p.model = value(4);
-            p.lend_chat = match value(6).to_lowercase().as_str() {
+            p.lend_per_hour = match value(6).parse::<i64>() {
+                Ok(n) if (1..=DELEGATE_PER_HOUR_MAX).contains(&n) => n,
+                _ => bail!(
+                    "Guest requests per hour: a whole number from 1 to {DELEGATE_PER_HOUR_MAX}"
+                ),
+            };
+            p.lend_chat = match value(7).to_lowercase().as_str() {
                 "yes" | "y" => true,
                 "no" | "n" | "" => false,
                 _ => bail!("Lend for chat: type yes or no"),

@@ -1849,10 +1849,10 @@ impl App {
             } else if self.job.is_some() {
                 self.status = format!("{who}: skipped, your agent is busy");
                 "busy"
-            } else if used >= profiles::DELEGATE_PER_HOUR {
+            } else if used >= bot.lend_per_hour {
                 self.status = format!(
-                    "{who}: skipped, limit of {} guest requests per hour reached",
-                    profiles::DELEGATE_PER_HOUR
+                    "{who}: skipped, limit of {} guest requests per hour reached (F8 → E to change)",
+                    bot.lend_per_hour
                 );
                 "quota"
             } else {

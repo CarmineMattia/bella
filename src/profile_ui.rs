@@ -377,6 +377,10 @@ pub(crate) fn draw(app: &App, f: &mut Frame, inner: Rect) {
             );
             let txt =
                 Rect::new(card.x + 8, card.y, card.width.saturating_sub(8), 3).intersection(card);
+            let lent_label = format!(
+                "Added here · lent to members (chat only, {}/h per person) · Enter removes",
+                p.lend_per_hour
+            );
             label(
                 f,
                 row(txt, 0),
@@ -401,7 +405,7 @@ pub(crate) fn draw(app: &App, f: &mut Frame, inner: Rect) {
                     "Always available"
                 } else if app.enabled_bots.contains(&p.handle) {
                     if p.lend_chat {
-                        "Added here · lent to members (chat only) · Enter removes"
+                        &lent_label
                     } else {
                         "Added here · Enter removes"
                     }
