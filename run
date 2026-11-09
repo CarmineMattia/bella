@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export ZIG_GLOBAL_CACHE_DIR="$root/.dev/zig-cache"
+export CARGO_HOME="$root/.dev/cargo"
+export RUSTUP_HOME="$root/.dev/rustup"
+export PATH="$CARGO_HOME/bin:$PATH"
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$root/.dev/rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$root/scripts/host-cc"
+export CC_x86_64_unknown_linux_musl="$root/scripts/cc"
+export CFLAGS_x86_64_unknown_linux_musl="-fno-sanitize=all"
+export AR_x86_64_unknown_linux_musl="$root/scripts/ar"
+if [[ ! -x "$CARGO_HOME/bin/cargo" ]]; then
+  echo 'Project toolchain missing. See README.md.' >&2
+  exit 1
+fi
+export TERM_SOCIAL_DATA="${TERM_SOCIAL_DATA:-$root/.data/chat.sqlite}"
+cd "$root"
+cargo build --quiet --target x86_64-unknown-linux-musl
+exec "$root/target/x86_64-unknown-linux-musl/debug/term-social" "$@"

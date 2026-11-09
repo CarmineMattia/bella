@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export ZIG_GLOBAL_CACHE_DIR="$PWD/.dev/zig-cache"
+export CARGO_HOME="$PWD/.dev/cargo" RUSTUP_HOME="$PWD/.dev/rustup"
+export PATH="$CARGO_HOME/bin:$PATH"
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$PWD/.dev/rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$PWD/scripts/host-cc"
+export CC_x86_64_unknown_linux_musl="$PWD/scripts/cc"
+export CFLAGS_x86_64_unknown_linux_musl="-fno-sanitize=all"
+export AR_x86_64_unknown_linux_musl="$PWD/scripts/ar"
+task="${1:-test}"
+if (( $# )); then shift; fi
+cargo "$task" --target x86_64-unknown-linux-musl "$@"

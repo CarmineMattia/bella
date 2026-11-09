@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+mkdir -p .dev
+export ZIG_GLOBAL_CACHE_DIR="$PWD/.dev/zig-cache"
+export CARGO_HOME="$PWD/.dev/cargo" RUSTUP_HOME="$PWD/.dev/rustup"
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o .dev/rustup-init.sh
+sh .dev/rustup-init.sh -y --profile minimal --no-modify-path
+"$CARGO_HOME/bin/rustup" target add x86_64-unknown-linux-musl
+python3 -m pip install --target .dev/python 'ziglang==0.17.0'
+echo 'Ready. Run ./run --name alice'

@@ -1,0 +1,15 @@
+/target/
+/.dev/
+/.data/
+*.sqlite*
+/dist/
+__pycache__/
+*.pyc
+
+/hub-data/
+*.network.json
+*.sync.lock
+*.invite
+
+.env
+.env.*
