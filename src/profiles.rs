@@ -4,6 +4,35 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path};
 
+/// Per-bot, device-local policy for tools offered to guests of a lent bot.
+/// Default is off: guests get chat-only answers. `shell` lets the bot propose
+/// shell commands that still need the owner's approval and run in a guest folder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestTools {
+    #[default]
+    Off,
+    Shell,
+}
+impl GuestTools {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "off" | "" => Ok(Self::Off),
+            "shell" => Ok(Self::Shell),
+            _ => bail!("Guest tools: type off or shell"),
+        }
+    }
+    pub fn as_form(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shell => "shell",
+        }
+    }
+    pub fn shell(self) -> bool {
+        matches!(self, Self::Shell)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Profile {
     pub owner: String,
@@ -22,6 +51,9 @@ pub struct Profile {
     /// Device-local like `lend_chat`; old profiles without it get the default.
     #[serde(default = "default_lend_per_hour")]
     pub lend_per_hour: i64,
+    /// Device-local like `lend_chat`; old profiles without it stay off.
+    #[serde(default)]
+    pub guest_tools: GuestTools,
 }
 /// Default guest requests per requester, per bot, in a rolling hour.
 pub const DELEGATE_PER_HOUR: i64 = 5;
@@ -42,6 +74,7 @@ impl Profile {
             avatar: vec![],
             lend_chat: false,
             lend_per_hour: DELEGATE_PER_HOUR,
+            guest_tools: GuestTools::Off,
         }
     }
     pub fn bot(owner: &str, handle: &str) -> Self {
@@ -215,7 +248,11 @@ impl Form {
                     p.lend_per_hour.to_string(),
                 ),
                 (
-                    "Lend for chat to group members: yes/no (guests never get tools)",
+                    "Guest tools when lent: off/shell (default off; not a sandbox)",
+                    p.guest_tools.as_form().into(),
+                ),
+                (
+                    "Lend for chat to group members: yes/no",
                     if p.lend_chat { "yes" } else { "no" }.into(),
                 ),
             ]
@@ -257,7 +294,8 @@ impl Form {
                     "Guest requests per hour: a whole number from 1 to {DELEGATE_PER_HOUR_MAX}"
                 ),
             };
-            p.lend_chat = match value(7).to_lowercase().as_str() {
+            p.guest_tools = GuestTools::parse(&value(7))?;
+            p.lend_chat = match value(8).to_lowercase().as_str() {
                 "yes" | "y" => true,
                 "no" | "n" | "" => false,
                 _ => bail!("Lend for chat: type yes or no"),

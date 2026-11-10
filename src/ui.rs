@@ -1467,7 +1467,7 @@ fn draw_dialog(app: &App, f: &mut Frame) {
 }
 fn draw_approval(app: &App, f: &mut Frame) {
     let a = app.approval.as_ref().unwrap();
-    let area = centered(f.area(), 92, 24);
+    let area = centered(f.area(), 92, 28);
     f.render_widget(Clear, area);
     fill(f, area, PANEL);
     let inner = area.inner(Margin::new(2, 1));
@@ -1476,6 +1476,8 @@ fn draw_approval(app: &App, f: &mut Frame) {
         row(inner, 0),
         if a.browser {
             "Browser · Needs approval"
+        } else if a.guest.is_some() {
+            "Guest shell · Needs approval"
         } else {
             "Review a shell command"
         },
@@ -1487,10 +1489,25 @@ fn draw_approval(app: &App, f: &mut Frame) {
         .as_ref()
         .map(|j| chat_name(&j.room))
         .unwrap_or_default();
+    let workdir = a
+        .guest
+        .as_ref()
+        .map(|g| g.home.display().to_string())
+        .unwrap_or_else(|| app.config.workspace.display().to_string());
+    let guest_line = a
+        .guest
+        .as_ref()
+        .map(|g| format!("Requested by guest: {}\n", safe(&g.requester)))
+        .unwrap_or_default();
+    let warning = if a.guest.is_some() {
+        "Not a sandbox: the command still runs as your Linux user and can read files outside this folder.\nCPU and RAM caps plus the guest folder are the isolation. No time limit; Ctrl+X stops a runaway command.\nNon-interactive: no password input; sudo uses -n."
+    } else {
+        "Runs as your Linux user, without a sandbox.\nNon-interactive: no password input; sudo uses -n."
+    };
     let body = format!(
-        "{}\n\nWorking directory: {}\nResult shared in: {}\n\nRuns as your Linux user, without a sandbox.\nNon-interactive: no password input; sudo uses -n.",
+        "{guest_line}{}\n\nWorking directory: {}\nResult shared in: {}\n\n{warning}",
         safe(&a.command),
-        safe(&app.config.workspace.display().to_string()),
+        safe(&workdir),
         room
     );
     let content = Rect::new(

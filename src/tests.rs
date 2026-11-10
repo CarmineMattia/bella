@@ -15,6 +15,7 @@ fn app_with(store: Store) -> Result<App> {
             author: String::new(),
             instructions: String::new(),
             tools: true,
+            guest: None,
         },
     )
 }
@@ -104,6 +105,7 @@ fn layout_survives_tiny_sizes_and_dialogs() -> Result<()> {
             command: "pwd".into(),
             answer: tx,
             scroll: 0,
+            guest: None,
         });
         t.draw(|f| ui::draw(&mut a, f))?;
         a.approval = None;
@@ -576,6 +578,7 @@ fn stopping_preserves_partial_reply_in_origin_and_blocks_pending_approval() -> R
         browser: false,
         command: "must not execute".into(),
         answer,
+        guest: None,
     })?;
     tx.send(agent::Event::Cancelled)?;
     a.poll_job()?;
@@ -1231,19 +1234,23 @@ fn bot_form_lend_flag_defaults_off_and_rejects_ambiguous_values() -> Result<()> 
     a.open_dialog(Dialog::Bots);
     a.dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
     assert_eq!(a.profile_form.as_ref().unwrap().fields[6].1.text, "5");
-    assert_eq!(a.profile_form.as_ref().unwrap().fields[7].1.text, "no");
+    assert_eq!(a.profile_form.as_ref().unwrap().fields[7].1.text, "off");
+    assert_eq!(a.profile_form.as_ref().unwrap().fields[8].1.text, "no");
     form_values(
         &mut a,
-        &["planner", "Planner", "", "", "", "", "5", "maybe"],
+        &["planner", "Planner", "", "", "", "", "5", "off", "maybe"],
     );
     a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
     assert!(a.profile_form.as_ref().unwrap().error.contains("yes or no"));
-    form_values(&mut a, &["planner", "Planner", "", "", "", "", "5", "no"]);
+    form_values(
+        &mut a,
+        &["planner", "Planner", "", "", "", "", "5", "off", "no"],
+    );
     a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
     assert!(!a.requested_bot("@planner").unwrap().lend_chat);
     a.selected = a.bots().iter().position(|p| p.handle == "planner").unwrap();
     a.dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))?;
-    a.profile_form.as_mut().unwrap().fields[7].1 = Editor::new("yes".into());
+    a.profile_form.as_mut().unwrap().fields[8].1 = Editor::new("yes".into());
     a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
     let planner = a.requested_bot("@planner").unwrap();
     assert!(planner.lend_chat);
@@ -1501,6 +1508,7 @@ fn browser_approval_and_denial_are_explicit_in_the_interface() -> Result<()> {
         command: "fake-browser 'https://example.com'".into(),
         answer,
         scroll: 0,
+        guest: None,
     });
     let mut t = Terminal::new(TestBackend::new(100, 30))?;
     t.draw(|f| ui::draw(&mut a, f))?;
@@ -1649,6 +1657,7 @@ fn browser_clicks_cannot_act_on_human_messages_or_bypass_a_dialog() -> Result<()
         command: "not executed".into(),
         answer,
         scroll: 0,
+        guest: None,
     });
     assert!(!a.open_browser_details_at(rect.x, rect.y));
     assert!(a.approval.is_some());
@@ -1726,14 +1735,20 @@ fn bot_form_guest_quota_is_bounded_and_per_bot() -> Result<()> {
     a.open_dialog(Dialog::Bots);
     a.dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
     for bad in ["0", "61", "-1", "two", "1.5", ""] {
-        form_values(&mut a, &["planner", "Planner", "", "", "", "", bad, "yes"]);
+        form_values(
+            &mut a,
+            &["planner", "Planner", "", "", "", "", bad, "off", "yes"],
+        );
         a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
         assert!(
             a.profile_form.as_ref().unwrap().error.contains("1 to 60"),
             "accepted quota {bad:?}"
         );
     }
-    form_values(&mut a, &["planner", "Planner", "", "", "", "", "2", "yes"]);
+    form_values(
+        &mut a,
+        &["planner", "Planner", "", "", "", "", "2", "off", "yes"],
+    );
     a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
     let planner = a.requested_bot("@planner").unwrap();
     assert_eq!(planner.lend_per_hour, 2);
@@ -1765,5 +1780,165 @@ fn delegated_quota_uses_the_bots_own_limit() -> Result<()> {
     );
     assert_eq!(delegate_outcome(&a, over).as_deref(), Some("quota"));
     assert!(a.status.contains("limit of 1"));
+    Ok(())
+}
+#[test]
+fn bot_form_guest_tools_default_off_and_legacy_profiles_stay_off() -> Result<()> {
+    let mut a = app()?;
+    a.open_dialog(Dialog::Bots);
+    a.dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
+    assert_eq!(a.profile_form.as_ref().unwrap().fields[7].1.text, "off");
+    form_values(
+        &mut a,
+        &["planner", "Planner", "", "", "", "", "5", "maybe", "yes"],
+    );
+    a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    assert!(
+        a.profile_form
+            .as_ref()
+            .unwrap()
+            .error
+            .contains("off or shell")
+    );
+    form_values(
+        &mut a,
+        &["planner", "Planner", "", "", "", "", "5", "shell", "yes"],
+    );
+    a.dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    let planner = a.requested_bot("@planner").unwrap();
+    assert!(planner.lend_chat);
+    assert_eq!(planner.guest_tools, profiles::GuestTools::Shell);
+    let mut json = serde_json::to_value(&planner)?;
+    json.as_object_mut().unwrap().remove("guest_tools");
+    let old: profiles::Profile = serde_json::from_value(json)?;
+    assert_eq!(old.guest_tools, profiles::GuestTools::Off);
+    Ok(())
+}
+
+fn finish_job_with_decision(a: &mut App, approve: bool) -> Result<()> {
+    let end = Instant::now() + Duration::from_secs(10);
+    while a.job.is_some() && Instant::now() < end {
+        a.poll_job()?;
+        if let Some(approval) = a.approval.take() {
+            let _ = approval.answer.send(approve);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(a.job.is_none(), "Delegated job did not finish");
+    Ok(())
+}
+
+#[test]
+fn guest_shell_approval_dialog_names_the_guest_and_workdir() -> Result<()> {
+    let mut a = app()?;
+    let home = std::env::temp_dir().join(format!("bella-guest-ui-{}", std::process::id()));
+    let (answer, decision) = mpsc::channel();
+    a.approval = Some(Approval {
+        browser: false,
+        command: "printf hello".into(),
+        answer,
+        scroll: 0,
+        guest: Some(agent::GuestContext {
+            requester: "bob".into(),
+            home: home.clone(),
+        }),
+    });
+    let mut t = Terminal::new(TestBackend::new(100, 32))?;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    let screen = contents(&t);
+    assert!(screen.contains("Guest shell · Needs approval"));
+    assert!(screen.contains("Requested by guest: bob"));
+    assert!(screen.contains(&home.display().to_string()));
+    assert!(screen.contains("Not a sandbox"));
+    a.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
+    assert!(!decision.recv()?);
+    Ok(())
+}
+
+#[test]
+fn lent_bot_guest_shell_needs_owner_approval_and_counts_against_quota() -> Result<()> {
+    let home_root = std::env::temp_dir().join(format!("bella-guest-data-{}", std::process::id()));
+    std::fs::create_dir_all(&home_root)?;
+    let marker = paths::guest_home(&home_root, "bob")?.join("from-guest");
+    let command = format!("printf ok > '{}'", marker.display());
+    let (endpoint, server) = mock_model(vec![
+        serde_json::json!({"role":"assistant","content":null,"tool_calls":[
+            {"id":"one","type":"function","function":{"name":"shell","arguments":serde_json::json!({"command":command}).to_string()}},
+            {"id":"two","type":"function","function":{"name":"open_browser","arguments":"{}"}}
+        ]}),
+        serde_json::json!({"role":"assistant","content":"Guest shell done"}),
+    ])?;
+    let mut a = networked(Store::open(std::path::Path::new(":memory:"))?)?;
+    a.data_dir = home_root.clone();
+    a.config.endpoint = endpoint;
+    let mut bot = lendable_planner(&mut a, true)?;
+    bot.guest_tools = profiles::GuestTools::Shell;
+    bot.lend_per_hour = 1;
+    profiles::save(a.store.connection(), &bot)?;
+    a.refresh()?;
+    a.store
+        .add("workshop", "bob", "@planner please run a check", "human")?;
+    let request = last_message_id(&a)?;
+    a.poll_delegated()?;
+    assert_eq!(a.job.as_ref().unwrap().requester.as_deref(), Some("bob"));
+    assert!(a.status.contains("guest shell"));
+    assert_eq!(delegate_outcome(&a, request).as_deref(), Some("started"));
+    // Second mention while busy still counts as skipped, and quota is already used.
+    a.store.add("workshop", "bob", "@planner again", "human")?;
+    a.poll_delegated()?;
+    assert_eq!(
+        delegate_outcome(&a, last_message_id(&a)?).as_deref(),
+        Some("busy")
+    );
+    finish_job_with_decision(&mut a, true)?;
+    assert!(
+        marker.exists(),
+        "Approved guest shell did not run in the guest folder"
+    );
+    let history = a.store.history("workshop")?;
+    assert!(
+        history
+            .iter()
+            .any(|m| m.kind == "bot" && m.body == "Guest shell done")
+    );
+    assert!(
+        history
+            .iter()
+            .any(|m| m.kind == "tool" && m.body.contains("Approved shell"))
+    );
+    let bodies = server.join().unwrap()?;
+    let tools = bodies[0]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["function"]["name"], "shell");
+    let tool_replies: Vec<_> = bodies[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .collect();
+    assert_eq!(tool_replies.len(), 2);
+    assert!(
+        tool_replies
+            .iter()
+            .any(|m| m["content"] == agent::GUEST_BROWSER_DISABLED)
+    );
+    // Quota already consumed by the started request; a later mention is blocked.
+    a.store
+        .add("workshop", "bob", "@planner after the first", "human")?;
+    let later = last_message_id(&a)?;
+    a.poll_delegated()?;
+    assert!(a.job.is_none());
+    assert_eq!(delegate_outcome(&a, later).as_deref(), Some("quota"));
+    let _ = std::fs::remove_dir_all(home_root);
+    Ok(())
+}
+
+#[test]
+fn lent_bot_keeps_tools_off_when_guest_tools_setting_is_off() -> Result<()> {
+    // Covered in more detail by lent_bot_answers_a_guest_in_the_group_without_tools_or_private_context;
+    // this asserts the new setting defaults off even when lending is enabled.
+    let mut a = networked(Store::open(std::path::Path::new(":memory:"))?)?;
+    let bot = lendable_planner(&mut a, true)?;
+    assert_eq!(bot.guest_tools, profiles::GuestTools::Off);
     Ok(())
 }

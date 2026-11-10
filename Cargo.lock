@@ -130,6 +130,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "image",
+ "libc",
  "ratatui",
  "reqwest",
  "rusqlite",

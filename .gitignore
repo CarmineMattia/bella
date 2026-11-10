@@ -1,5 +1,6 @@
 /target/
 /.dev/
+.dev
 /.data/
 *.sqlite*
 /dist/

@@ -378,7 +378,12 @@ pub(crate) fn draw(app: &App, f: &mut Frame, inner: Rect) {
             let txt =
                 Rect::new(card.x + 8, card.y, card.width.saturating_sub(8), 3).intersection(card);
             let lent_label = format!(
-                "Added here · lent to members (chat only, {}/h per person) · Enter removes",
+                "Added here · lent to members ({}, {}/h per person) · Enter removes",
+                if p.guest_tools.shell() {
+                    "chat + guest shell"
+                } else {
+                    "chat only"
+                },
                 p.lend_per_hour
             );
             label(
@@ -400,7 +405,7 @@ pub(crate) fn draw(app: &App, f: &mut Frame, inner: Rect) {
                 f,
                 row(txt, 1),
                 if p.owner != app.name {
-                    "Shared bot · answers only if its owner lends it (chat only) · owner edits"
+                    "Shared bot · answers only if its owner lends it · owner edits"
                 } else if p.handle == "bot" {
                     "Always available"
                 } else if app.enabled_bots.contains(&p.handle) {

@@ -17,6 +17,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "net"] }
+libc = "0.2"
 
 [profile.release]
 strip = true

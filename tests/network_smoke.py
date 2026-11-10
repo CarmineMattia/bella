@@ -110,7 +110,7 @@ class Network(unittest.TestCase):
         eventually(lambda:self.sql('device-a',"SELECT id FROM messages WHERE body='@planner before lending'"))
         eventually(lambda:self.sql('device-a',"SELECT outcome FROM delegate_requests")==[('not_lent',)])
         self.assertEqual(len(model.bodies),0)
-        # Alice opts in from her own bot form (last field), still in the Bots dialog.
+        # Alice opts in from her own bot form (Lend for chat is the last field), still in the Bots dialog.
         a.send('\x1b[B');a.send('e');a.wait_text('Bot profile');a.send('\x1b[Z\x15yes\x13')
         eventually(lambda:json.loads(self.sql('device-a',"SELECT data FROM profiles WHERE owner='alice' AND handle='planner'")[0][0]).get('lend_chat') is True)
         a.send('\x1b')
@@ -124,7 +124,11 @@ class Network(unittest.TestCase):
         self.assertEqual(self.sql('device-b',"SELECT author,kind FROM messages WHERE body='second request completed'"),[("alice's @planner",'bot')])
         self.assertEqual(self.sql('device-a',"SELECT requester,state FROM agent_tasks"),[('bob','completed')])
         # Lending settings stay on Alice's device: Bob's copy of the profile has no opt-in.
-        self.assertFalse(json.loads(self.sql('device-b',"SELECT data FROM profiles WHERE owner='alice' AND handle='planner'")[0][0]).get('lend_chat',False))
+        bob_profile=json.loads(self.sql('device-b',"SELECT data FROM profiles WHERE owner='alice' AND handle='planner'")[0][0])
+        self.assertFalse(bob_profile.get('lend_chat',False))
+        self.assertNotEqual(bob_profile.get('guest_tools'),'shell')
+        alice_profile=json.loads(self.sql('device-a',"SELECT data FROM profiles WHERE owner='alice' AND handle='planner'")[0][0])
+        self.assertEqual(alice_profile.get('guest_tools','off'),'off')
         a.close();b.close()
     def test_large_history_same_account_bootstrap_and_logout(self):
         alice=self.register('alice')

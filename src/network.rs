@@ -460,7 +460,7 @@ fn cycle(
     }
     Ok(())
 }
-/// Device-local bot settings (instructions, model, lending opt-in) never leave this device.
+/// Device-local bot settings (instructions, model, lending opt-in, guest tools) never leave this device.
 fn public_payload(payload: &mut Value) {
     if payload["type"] == "profile" {
         payload["profile"]["instructions"] = json!("");
@@ -468,6 +468,7 @@ fn public_payload(payload: &mut Value) {
         if let Some(profile) = payload["profile"].as_object_mut() {
             profile.remove("lend_chat");
             profile.remove("lend_per_hour");
+            profile.remove("guest_tools");
         }
     }
 }
@@ -521,10 +522,11 @@ fn apply(store: &Store, data: &Value, user_id: &str) -> Result<()> {
             }
             "profile" => {
                 let mut p: profiles::Profile = serde_json::from_value(p["profile"].clone())?;
-                // Model instructions and the lending opt-in remain on the device. Only public
-                // presentation is shared; a remote event can never enable lending.
+                // Model instructions, the lending opt-in and guest-tool policy remain on the device.
+                // Only public presentation is shared; a remote event can never enable them.
                 p.lend_chat = false;
                 p.lend_per_hour = profiles::DELEGATE_PER_HOUR;
+                p.guest_tools = profiles::GuestTools::Off;
                 if let Ok(old) = tx.query_row(
                     "SELECT data FROM profiles WHERE owner=?1 AND handle=?2",
                     params![p.owner, p.handle],
@@ -535,6 +537,7 @@ fn apply(store: &Store, data: &Value, user_id: &str) -> Result<()> {
                     p.model = old.model;
                     p.lend_chat = old.lend_chat;
                     p.lend_per_hour = old.lend_per_hour;
+                    p.guest_tools = old.guest_tools;
                 }
                 profiles::save(&tx, &p)?;
             }
@@ -764,6 +767,7 @@ mod tests {
         p.instructions = "Local private instructions".into();
         p.model = "local-model".into();
         p.lend_chat = true;
+        p.guest_tools = profiles::GuestTools::Shell;
         profiles::save(store.connection(), &p)?;
         let mut outgoing: Value = serde_json::from_str(&store.connection().query_row(
             "SELECT payload FROM network_outbox ORDER BY id DESC LIMIT 1",
@@ -773,6 +777,7 @@ mod tests {
         public_payload(&mut outgoing);
         assert!(outgoing["profile"].get("lend_chat").is_none());
         assert!(outgoing["profile"].get("lend_per_hour").is_none());
+        assert!(outgoing["profile"].get("guest_tools").is_none());
         assert_eq!(outgoing["profile"]["instructions"], "");
         store
             .connection()
@@ -795,9 +800,11 @@ mod tests {
             after.lend_chat,
             "Local lending opt-in was overwritten by sync"
         );
-        // A remote profile cannot switch lending on for a bot on this device.
+        assert_eq!(after.guest_tools, profiles::GuestTools::Shell);
+        // A remote profile cannot switch lending or guest tools on for a bot on this device.
         let mut forged = profiles::Profile::bot("bob", "helper");
         forged.lend_chat = true;
+        forged.guest_tools = profiles::GuestTools::Shell;
         apply(
             &store,
             &json!({"cursor":2,"events":[event(2,"bob","forged-lend",json!({"type":"profile","profile":forged}))]}),
@@ -808,6 +815,7 @@ mod tests {
             .find(|p| p.handle == "helper")
             .unwrap();
         assert!(!helper.lend_chat);
+        assert_eq!(helper.guest_tools, profiles::GuestTools::Off);
         Ok(())
     }
     #[test]

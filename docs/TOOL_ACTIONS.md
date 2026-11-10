@@ -11,7 +11,7 @@ A denial now ends the tool phase for the entire current request. The app enforce
 
 This does not undo actions you already approved and that already ran. Their existing output remains saved. Denied actions execute nothing. The existing task cancellation behavior remains separate: stopping a running approved command waits for its bounded result rather than claiming to undo its effects.
 
-The scope is one agent request. Denial is not a permanent bot setting and does not affect other app instances. Guest requests to lent bots remain chat-only regardless of the owner's approval state: no tool definitions, approval dialogs or tool execution are available to those requests.
+The scope is one agent request. Denial is not a permanent bot setting and does not affect other app instances. Guest requests to lent bots stay chat-only unless the owner has set *Guest tools when lent* to `shell` for that bot. In that case only `shell` is offered, each command still needs the owner's approval (the dialog names the guest and the working directory), and `open_browser` is never available. A denial still ends the tool phase for that request. This is not a sandbox; see [known issues](KNOWN_ISSUES.md).
 
 Browser cards show Denied, and their Details contain the reason. Shell denial messages explain that further actions for this request are stopped. Repeated blocked calls return a result to the model without filling the conversation with repeated log messages. The existing six-model-turn limit still bounds a model that refuses to finish.
 
@@ -21,7 +21,7 @@ Shell tools run in a separate session with no controlling terminal and closed st
 
 Privilege/authentication failures and timeouts include explicit notices for the agent. A failed command is different from an owner denial: the bot may request further diagnostic commands, each requiring approval. For status/crash questions the agent is instructed to inspect installed package metadata, process state and relevant logs first, continue with useful non-privileged checks after an error, and avoid starting an upgrade just to check status. An unfamiliar package name is not evidence that it does not exist. Tasks requiring fresh administrator authentication still need the owner's own terminal; the app does not pretend to have completed those actions.
 
-Captured output is capped at 16 KiB per stream. The truncation footer appears only if output was actually cut. The 20-second execution limit still applies; timeout results do not prove an update completed and must not trigger blind repeats of state-changing commands.
+Captured output is capped at 16 KiB per stream. The truncation footer appears only if output was actually cut. The 20-second execution limit still applies to the owner's own commands; timeout results do not prove an update completed and must not trigger blind repeats of state-changing commands. Guest shell commands have no time limit; Stop sends SIGTERM then SIGKILL to the command's process group.
 
 ## Copying messages
 

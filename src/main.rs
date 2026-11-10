@@ -87,6 +87,7 @@ struct Approval {
     command: String,
     answer: mpsc::Sender<bool>,
     scroll: u16,
+    guest: Option<agent::GuestContext>,
 }
 struct Job {
     author: String,
@@ -100,7 +101,7 @@ struct Job {
     partial: String,
     room: String,
     events: mpsc::Receiver<agent::Event>,
-    /// Set for a delegated (guest) chat-only request: the account that mentioned the bot.
+    /// Set for a delegated (guest) request: the account that mentioned the bot.
     requester: Option<String>,
 }
 #[derive(PartialEq)]
@@ -150,6 +151,8 @@ struct App {
     job: Option<Job>,
     store: Store,
     config: agent::Config,
+    /// Directory containing the database; guest folders are created under `guests/`.
+    data_dir: PathBuf,
     dialog: Option<Dialog>,
     query: Editor,
     selected: usize,
@@ -315,8 +318,12 @@ fn main() -> Result<()> {
             author: String::new(),
             instructions: String::new(),
             tools: true,
+            guest: None,
         },
     )?;
+    if let Some(parent) = args.data.parent().filter(|p| !p.as_os_str().is_empty()) {
+        app.data_dir = parent.to_path_buf();
+    }
     if let Some(c) = credentials {
         app.network = Some(network::Connection::start(c, args.data));
     }
@@ -471,6 +478,7 @@ impl App {
             job: None,
             store,
             config,
+            data_dir: PathBuf::from("."),
             dialog: None,
             query: Editor::default(),
             selected: 0,
@@ -1784,7 +1792,7 @@ impl App {
         Ok(())
     }
     /// Owner side of bot lending: answer new mentions of this account's lent bots that other
-    /// accounts post in shared groups. Chat only; tools are never offered to guests.
+    /// accounts post in shared groups. Tools are off unless the owner enabled guest shell.
     fn poll_delegated(&mut self) -> Result<()> {
         if self.network.is_none() || self.quitting {
             return Ok(());
@@ -1896,7 +1904,17 @@ impl App {
         let mut config = self.config.clone();
         config.author = author.clone();
         config.instructions = bot.instructions.clone();
+        config.guest = None;
         config.tools = false;
+        if bot.guest_tools.shell() {
+            let home = paths::prepare_guest_home(&self.data_dir, requester)?;
+            config.tools = true;
+            config.workspace = home.clone();
+            config.guest = Some(agent::GuestContext {
+                requester: requester.into(),
+                home,
+            });
+        }
         if !bot.model.is_empty() {
             config.model = bot.model.clone();
         }
@@ -1923,12 +1941,21 @@ impl App {
             events: task.events,
             requester: Some(requester.into()),
         });
-        self.status = format!(
-            "{} is answering {} in {} · chat only, tools off · Ctrl+X stops",
-            safe(&author),
-            safe(requester),
-            chat_name(room)
-        );
+        self.status = if bot.guest_tools.shell() {
+            format!(
+                "{} is answering {} in {} · guest shell, needs your approval · Ctrl+X stops",
+                safe(&author),
+                safe(requester),
+                chat_name(room)
+            )
+        } else {
+            format!(
+                "{} is answering {} in {} · chat only, tools off · Ctrl+X stops",
+                safe(&author),
+                safe(requester),
+                chat_name(room)
+            )
+        };
         Ok(())
     }
     fn retry(&mut self) -> Result<()> {
@@ -1984,22 +2011,34 @@ impl App {
                         command,
                         answer,
                         browser,
+                        guest,
                     }) => {
-                        // Defence in depth: delegated requests never show or grant approval.
-                        if job.stopping || job.requester.is_some() {
+                        // Stopping cancels pending approval. Guest browser proposals are
+                        // refused here as well (the agent should already have blocked them).
+                        // Guest shell commands require the owner's approval on this device.
+                        if job.stopping || browser && job.requester.is_some() {
                             drop(answer);
                             continue;
                         }
                         if let Some(id) = job.task_id {
                             tasks::proposed(self.store.connection(), id, &command)?;
                         }
+                        self.status = if let Some(guest) = &guest {
+                            format!(
+                                "Approval needed for guest {} in {}",
+                                safe(&guest.requester),
+                                chat_name(&job.room)
+                            )
+                        } else {
+                            format!("Approval needed in {}", chat_name(&job.room))
+                        };
                         self.approval = Some(Approval {
                             browser,
                             command,
                             answer,
                             scroll: 0,
+                            guest,
                         });
-                        self.status = format!("Approval needed in {}", chat_name(&job.room));
                     }
                     Ok(agent::Event::Finished(result)) => {
                         match result {
