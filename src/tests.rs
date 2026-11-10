@@ -88,6 +88,7 @@ fn layout_survives_tiny_sizes_and_dialogs() -> Result<()> {
             Dialog::ChatActions,
             Dialog::Tasks,
             Dialog::TaskDetails,
+            Dialog::BrowserDetails,
             Dialog::Participants,
             Dialog::Network,
             Dialog::Profile,
@@ -99,6 +100,7 @@ fn layout_survives_tiny_sizes_and_dialogs() -> Result<()> {
         }
         let (tx, _) = mpsc::channel();
         a.approval = Some(Approval {
+            browser: false,
             command: "pwd".into(),
             answer: tx,
             scroll: 0,
@@ -239,6 +241,34 @@ fn ui_preview() -> Result<()> {
         net.state.detail = "Connected · account authenticated · sample data".into();
         a.network = Some(net);
         a.open_dialog(Dialog::Network);
+    }
+    if std::env::var("TERM_SOCIAL_PREVIEW_MODE").as_deref() == Ok("browser") {
+        a.store
+            .add(&a.room, "carmine", "@bot open https://example.com", "human")?;
+        let action = browser::Action::result(
+            "https://example.com".into(),
+            "xdg-open 'https://example.com'".into(),
+            true,
+            "Exit: exit status: 0\nLauncher warning is available in Details".into(),
+        );
+        a.store.add(&a.room, "tools", &action.record(), "tool")?;
+        a.refresh()?;
+        a.input = Editor::default();
+        a.status = "F11 Browser details · launch requested, window unverified".into();
+    }
+    if std::env::var("TERM_SOCIAL_PREVIEW_MODE").as_deref() == Ok("copy") {
+        a.switch_room("agent:carmine".into())?;
+        a.store.add(
+            &a.room,
+            "carmine",
+            "Check why the app keeps crashing.",
+            "human",
+        )?;
+        a.store.add(&a.room,"tools","Exit: exit status: 1\nAdministrator authorization required. This chat cannot receive a sudo password.\nsudo: a password is required","tool")?;
+        a.store.add(&a.room,"carmine's bot","That command needs administrator authentication. I can continue with non-privileged package and crash-log checks; each command will still need your approval.","bot")?;
+        a.refresh()?;
+        a.input = Editor::default();
+        a.status = "Click Copy on any message · text keeps its original line breaks".into();
     }
     let mut t = Terminal::new(TestBackend::new(128, 40))?;
     t.draw(|f| ui::draw(&mut a, f))?;
@@ -530,6 +560,7 @@ fn stopping_preserves_partial_reply_in_origin_and_blocks_pending_approval() -> R
     assert!(a.job.as_ref().unwrap().stopping);
     let (answer, approval) = mpsc::channel();
     tx.send(agent::Event::Approval {
+        browser: false,
         command: "must not execute".into(),
         answer,
     })?;
@@ -955,11 +986,11 @@ fn live_browser_request_corrects_previous_refusal_and_asks_for_approval() -> Res
         if let Some(approval) = &a.approval {
             println!("Browser approval requested: {}", approval.command);
             assert!(
-                approval.command.starts_with("gtk-launch "),
+                approval.browser && approval.command.contains("gtk-launch "),
                 "Expected the registered desktop browser launcher, got {}",
                 approval.command
             );
-            assert!(approval.command.ends_with("'about:blank'"));
+            assert!(!approval.command.contains("about:blank"));
             proposed = Some(approval.command.clone());
             a.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
         }
@@ -1386,5 +1417,289 @@ fn delegated_quota_and_failures_never_spam_or_leak_details() -> Result<()> {
     let task = &tasks::list(a.store.connection(), "alice")?[0];
     assert_eq!(task.state, "failed");
     assert!(!task.error.is_empty());
+    Ok(())
+}
+
+#[test]
+fn browser_cards_hide_diagnostics_and_details_browse_saved_actions() -> Result<()> {
+    let mut a = app()?;
+    let action = browser::Action::result(
+        "https://example.com".into(),
+        "fake-launch".into(),
+        true,
+        "WAYLAND_DIAGNOSTIC_SENTINEL".into(),
+    );
+    a.store.add("lobby", "tools", &action.record(), "tool")?;
+    a.store.add(
+        "lobby",
+        "tools",
+        &browser::Action::result(
+            "https://failed.example".into(),
+            "fake-fail".into(),
+            false,
+            "FAILED_DIAGNOSTIC_SENTINEL".into(),
+        )
+        .record(),
+        "tool",
+    )?;
+    a.refresh()?;
+    let mut t = Terminal::new(TestBackend::new(120, 40))?;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    let screen = |t: &Terminal<TestBackend>| -> String {
+        t.backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    };
+    let chat = screen(&t);
+    assert!(chat.contains("Launch requested"));
+    assert!(chat.contains("Browser · Failed"));
+    assert!(!chat.contains("DIAGNOSTIC_SENTINEL"));
+    assert!(!chat.contains("Browser action v1"));
+    a.key(KeyEvent::new(KeyCode::F(11), KeyModifiers::NONE))?;
+    assert_eq!(a.selected, 1);
+    t.draw(|f| ui::draw(&mut a, f))?;
+    assert!(screen(&t).contains("FAILED_DIAGNOSTIC_SENTINEL"));
+    a.dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    assert!(screen(&t).contains("WAYLAND_DIAGNOSTIC_SENTINEL"));
+    a.dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(a.dialog.is_none());
+    a.submit("/browser".into())?;
+    assert!(a.dialog == Some(Dialog::BrowserDetails));
+    assert_eq!(a.selected, 1);
+    a.dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    a.switch_room("other".into())?;
+    assert!(a.browser_actions().is_empty());
+    Ok(())
+}
+
+#[test]
+fn browser_approval_and_denial_are_explicit_in_the_interface() -> Result<()> {
+    let mut a = app()?;
+    let (answer, decision) = mpsc::channel();
+    a.approval = Some(Approval {
+        browser: true,
+        command: "fake-browser 'https://example.com'".into(),
+        answer,
+        scroll: 0,
+    });
+    let mut t = Terminal::new(TestBackend::new(100, 30))?;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    assert!(contents(&t).contains("Browser · Needs approval"));
+    a.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
+    assert!(!decision.recv()?);
+    assert!(a.approval.is_none());
+    let denied = browser::Action {
+        state: browser::State::Denied,
+        target: "Default browser".into(),
+        command: "fake-browser".into(),
+        diagnostics: "Nothing executed".into(),
+    };
+    a.store.add(&a.room, "tools", &denied.record(), "tool")?;
+    a.refresh()?;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    assert!(contents(&t).contains("Browser · Denied"));
+    Ok(())
+}
+
+fn add_browser_fixture(a: &mut App, destination: &str) -> Result<i64> {
+    let action = browser::Action::result(
+        destination.into(),
+        "fake-launch-only".into(),
+        true,
+        format!("Diagnostics for {destination}"),
+    );
+    a.store.add(&a.room, "tools", &action.record(), "tool")?;
+    Ok(a.store.connection().last_insert_rowid())
+}
+
+#[test]
+fn clicking_browser_details_targets_the_card_and_keeps_its_message_identity() -> Result<()> {
+    let mut a = app()?;
+    let first = add_browser_fixture(&mut a, "FIRST_TARGET")?;
+    add_browser_fixture(&mut a, "SECOND_TARGET")?;
+    a.refresh()?;
+    let mut t = Terminal::new(TestBackend::new(120, 40))?;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    let (rect, _) = a
+        .browser_links
+        .iter()
+        .find(|(_, id)| *id == first)
+        .copied()
+        .expect("first card button visible");
+    assert_eq!(t.backend().buffer()[(rect.x, rect.y)].symbol(), "[");
+    assert!(!a.open_browser_details_at(rect.x.saturating_sub(1), rect.y));
+    assert!(!a.open_browser_details_at(rect.right(), rect.y));
+    assert!(a.open_browser_details_at(rect.x, rect.y));
+    assert_eq!(a.browser_detail_id, Some(first));
+    assert_eq!(a.browser_detail_index(), Some(0));
+    t.draw(|f| ui::draw(&mut a, f))?;
+    assert!(contents(&t).contains("Diagnostics for FIRST_TARGET"));
+    assert!(!contents(&t).contains("Diagnostics for SECOND_TARGET"));
+    // Simulate loading an earlier action while Details is open. Its array position
+    // moves, but the selected message and diagnostic content must stay the same.
+    let mut earlier = a.messages[0].clone();
+    earlier.id = -1;
+    a.messages.insert(0, earlier);
+    add_browser_fixture(&mut a, "NEW_TARGET")?;
+    let latest = a.store.history(&a.room)?.pop().unwrap();
+    a.messages.push(latest);
+    assert_eq!(a.browser_detail_index(), Some(1));
+    t.draw(|f| ui::draw(&mut a, f))?;
+    assert!(contents(&t).contains("Diagnostics for FIRST_TARGET"));
+    a.dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(a.browser_detail_index(), Some(2));
+    a.dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    assert_eq!(a.browser_detail_id, Some(first));
+    a.messages.retain(|message| message.id != first);
+    t.draw(|f| ui::draw(&mut a, f))?;
+    assert!(contents(&t).contains("no longer in the loaded chat history"));
+    assert!(!contents(&t).contains("Diagnostics for SECOND_TARGET"));
+    Ok(())
+}
+
+#[test]
+fn browser_mouse_targets_follow_scroll_resize_overlays_and_room_changes() -> Result<()> {
+    let mut a = app()?;
+    for i in 0..12 {
+        add_browser_fixture(&mut a, &format!("https://example.com/{i}"))?;
+    }
+    a.refresh()?;
+    let latest = a.messages.last().unwrap().id;
+    let mut t = Terminal::new(TestBackend::new(100, 30))?;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    assert!(a.browser_links.iter().any(|(_, id)| *id == latest));
+    a.scroll = 14;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    let history = ui::screen(t.size()?.into()).history;
+    let links = a.browser_links.clone();
+    assert!(!links.is_empty());
+    for (rect, _) in &links {
+        assert!(history.contains((rect.x, rect.y).into()));
+        assert!(
+            rect.y < history.bottom() - 1,
+            "Latest messages overlay consumes clicks"
+        );
+        assert_eq!(t.backend().buffer()[(rect.x, rect.y)].symbol(), "[");
+    }
+    let (rect, id) = links[0];
+    assert!(a.open_browser_details_at(rect.x, rect.y));
+    assert_eq!(a.browser_detail_id, Some(id));
+    a.dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    for (width, height) in [(70, 20), (30, 10), (10, 4), (1, 1)] {
+        t = Terminal::new(TestBackend::new(width, height))?;
+        t.draw(|f| ui::draw(&mut a, f))?;
+        let history = ui::screen(t.size()?.into()).history;
+        assert!(
+            a.browser_links
+                .iter()
+                .all(|(rect, _)| rect.intersection(history) == *rect)
+        );
+    }
+    a.switch_room("other".into())?;
+    assert!(a.browser_links.is_empty());
+    assert!(!a.open_browser_details_at(rect.x, rect.y));
+    Ok(())
+}
+
+#[test]
+fn browser_clicks_cannot_act_on_human_messages_or_bypass_a_dialog() -> Result<()> {
+    let mut a = app()?;
+    let record = browser::Action::result(
+        "looks like a browser action".into(),
+        "not executed".into(),
+        true,
+        String::new(),
+    )
+    .record();
+    a.store.add(&a.room, "bob", &record, "human")?;
+    a.refresh()?;
+    let mut t = Terminal::new(TestBackend::new(120, 40))?;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    assert!(a.browser_links.is_empty());
+    add_browser_fixture(&mut a, "REAL_TOOL_RECORD")?;
+    a.refresh()?;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    let (rect, _) = a.browser_links[0];
+    a.open_dialog(Dialog::Help);
+    assert!(!a.open_browser_details_at(rect.x, rect.y));
+    a.dialog = None;
+    let (answer, _) = mpsc::channel();
+    a.approval = Some(Approval {
+        browser: true,
+        command: "not executed".into(),
+        answer,
+        scroll: 0,
+    });
+    assert!(!a.open_browser_details_at(rect.x, rect.y));
+    assert!(a.approval.is_some());
+    Ok(())
+}
+
+#[test]
+fn copy_buttons_cover_message_kinds_and_preserve_exact_text() -> Result<()> {
+    let mut a = app()?;
+    let body = "Hello 界\n```sh\nprintf '%s' \"$HOME\"\n```";
+    for (author, kind) in [
+        ("alice", "human"),
+        ("bob", "human"),
+        ("alice's bot", "bot"),
+        ("tools", "tool"),
+        ("system", "system"),
+        ("alice's bot", "interrupted"),
+    ] {
+        a.store.add(&a.room, author, body, kind)?;
+    }
+    a.refresh()?;
+    for message in &a.messages {
+        assert_eq!(a.message_copy_text(message.id).as_deref(), Some(body));
+    }
+    let mut t = Terminal::new(TestBackend::new(120, 50))?;
+    t.draw(|f| ui::draw(&mut a, f))?;
+    assert!(a.copy_links.len() >= 5);
+    for (rect, id) in &a.copy_links {
+        assert!(a.message_copy_text(*id).is_some());
+        assert_eq!(t.backend().buffer()[(rect.x, rect.y)].symbol(), "[");
+    }
+    // Test completion without touching the real desktop clipboard.
+    let id = a.messages[0].id;
+    let (sender, receiver) = mpsc::channel();
+    a.copy_job = Some((id, receiver));
+    sender.send(Ok(clipboard::Outcome::Copied))?;
+    a.poll_clipboard();
+    assert_eq!(a.status, "Message copied");
+    assert!(a.copy_feedback.as_ref().unwrap().2);
+    a.switch_room("other".into())?;
+    assert!(a.copy_links.is_empty());
+    assert!(a.message_copy_text(id).is_none());
+    Ok(())
+}
+#[test]
+fn copy_hitboxes_follow_resize_and_do_not_overlap_details_or_latest_overlay() -> Result<()> {
+    let mut a = app()?;
+    for i in 0..12 {
+        add_browser_fixture(&mut a, &format!("https://example.com/{i}"))?;
+    }
+    a.refresh()?;
+    a.scroll = 14;
+    for (width, height) in [(120, 40), (70, 20), (30, 10), (10, 4), (1, 1)] {
+        let mut t = Terminal::new(TestBackend::new(width, height))?;
+        t.draw(|f| ui::draw(&mut a, f))?;
+        let history = ui::screen(t.size()?.into()).history;
+        for (rect, _) in &a.copy_links {
+            assert_eq!(rect.intersection(history), *rect);
+            if a.scroll > 0 {
+                assert!(rect.y < history.bottom() - 1);
+            }
+            assert!(
+                a.browser_links
+                    .iter()
+                    .all(|(details, _)| details.intersection(*rect).is_empty())
+            );
+        }
+    }
     Ok(())
 }

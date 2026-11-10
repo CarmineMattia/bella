@@ -1,5 +1,6 @@
 mod agent;
 mod browser;
+mod clipboard;
 mod editor;
 mod network;
 mod profile_ui;
@@ -79,6 +80,7 @@ struct Args {
     history: bool,
 }
 struct Approval {
+    browser: bool,
     command: String,
     answer: mpsc::Sender<bool>,
     scroll: u16,
@@ -108,6 +110,7 @@ enum Dialog {
     ChatActions,
     Tasks,
     TaskDetails,
+    BrowserDetails,
     Participants,
     Network,
     Profile,
@@ -156,7 +159,13 @@ struct App {
     session: String,
     task_records: Vec<tasks::TaskRecord>,
     task_detail: Option<tasks::TaskRecord>,
+    browser_detail_id: Option<i64>,
+    browser_links: Vec<(ratatui::layout::Rect, i64)>,
+    copy_links: Vec<(ratatui::layout::Rect, i64)>,
+    copy_job: Option<(i64, mpsc::Receiver<Result<clipboard::Outcome, String>>)>,
+    copy_feedback: Option<(i64, Instant, bool)>,
     quitting: bool,
+    return_to_welcome: bool,
     participants: Vec<tasks::Participant>,
     /// Highest message id already examined for delegated mentions (never replays history).
     delegate_after: i64,
@@ -240,6 +249,8 @@ fn main() -> Result<()> {
     if !settings::valid_name(&profile.name) {
         bail!("Choose a name of 1–32 printable characters");
     }
+    let welcome_data = args.data.clone();
+    let welcome_network = args.network;
     let credentials = if args.network {
         let session_path = args.data.with_extension("network.json");
         let Some(c) = network::login(&session_path, args.network_setup)? else {
@@ -306,7 +317,36 @@ fn main() -> Result<()> {
         DisableBracketedPaste
     );
     ratatui::restore();
-    result
+    result?;
+    if app.return_to_welcome {
+        // Re-enter setup only after the terminal and task/session state are clean.
+        // Use the original network base path, not the per-account cache path.
+        let name = app.name.clone();
+        let config = app.config.clone();
+        drop(app);
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command
+            .env_remove("TERM_SOCIAL_WORKSPACE")
+            .arg("--setup")
+            .arg("--data")
+            .arg(welcome_data)
+            .arg("--config")
+            .arg(config_path)
+            .arg("--name")
+            .arg(name)
+            .arg("--endpoint")
+            .arg(config.endpoint)
+            .arg("--model")
+            .arg(config.model)
+            .arg("--workspace")
+            .arg(config.workspace);
+        if welcome_network {
+            command.arg("--network");
+        }
+        return Err(command.exec().into());
+    }
+    Ok(())
 }
 fn doctor(store: &Store, data: &std::path::Path, profile: &settings::Settings) -> Result<()> {
     let integrity = store.integrity()?;
@@ -428,7 +468,13 @@ impl App {
             session,
             task_records: vec![],
             task_detail: None,
+            browser_detail_id: None,
+            browser_links: Vec::new(),
+            copy_links: Vec::new(),
+            copy_job: None,
+            copy_feedback: None,
             quitting: false,
+            return_to_welcome: false,
             participants: vec![],
             delegate_after,
             delegate_since,
@@ -575,6 +621,9 @@ impl App {
                 &self.room,
             )?;
             self.messages.clear();
+            self.browser_links.clear();
+            self.copy_links.clear();
+            self.browser_detail_id = None;
             self.following = true;
             self.has_newer = false;
             self.anchor = None;
@@ -680,6 +729,130 @@ impl App {
             })
             .collect()
     }
+    fn message_copy_text(&self, id: i64) -> Option<String> {
+        if id == 0 {
+            return self
+                .job
+                .as_ref()
+                .filter(|job| job.room == self.room && !job.partial.is_empty())
+                .map(|job| job.partial.clone());
+        }
+        let message = self.messages.iter().find(|message| message.id == id)?;
+        Some(if message.kind == "tool" {
+            browser::Action::decode(&message.body)
+                .map(|action| action.details())
+                .unwrap_or_else(|| message.body.clone())
+        } else {
+            message.body.clone()
+        })
+    }
+    fn copy_message_at(&mut self, column: u16, row: u16) -> bool {
+        if self.dialog.is_some() || self.approval.is_some() {
+            return false;
+        }
+        let Some(id) = self
+            .copy_links
+            .iter()
+            .find(|(rect, _)| rect.contains((column, row).into()))
+            .map(|(_, id)| *id)
+        else {
+            return false;
+        };
+        let Some(text) = self.message_copy_text(id) else {
+            return false;
+        };
+        if self.copy_job.is_some() {
+            self.status = "Copy in progress; try again shortly".into();
+            return true;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(clipboard::copy(text));
+        });
+        self.copy_job = Some((id, rx));
+        self.status = "Copying message…".into();
+        true
+    }
+    fn poll_clipboard(&mut self) {
+        let Some((id, receiver)) = &self.copy_job else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("Clipboard worker stopped".into()),
+        };
+        let id = *id;
+        self.copy_job = None;
+        match result {
+            Ok(clipboard::Outcome::Copied) => {
+                self.copy_feedback = Some((id, Instant::now(), true));
+                self.status = "Message copied".into();
+            }
+            Ok(clipboard::Outcome::TerminalRequest(sequence)) => {
+                use std::io::Write;
+                let mut output = std::io::stdout().lock();
+                match output
+                    .write_all(sequence.as_bytes())
+                    .and_then(|_| output.flush())
+                {
+                    Ok(()) => {
+                        self.copy_feedback = Some((id, Instant::now(), false));
+                        self.status =
+                            "Copy sent to terminal · clipboard access must be enabled".into();
+                    }
+                    Err(error) => self.status = format!("Copy failed: {error}"),
+                }
+            }
+            Err(error) => self.status = format!("Copy failed: {error}"),
+        }
+    }
+    fn browser_actions(&self) -> Vec<(i64, browser::Action)> {
+        self.messages
+            .iter()
+            .filter(|m| m.kind == "tool")
+            .filter_map(|m| browser::Action::decode(&m.body).map(|action| (m.id, action)))
+            .collect()
+    }
+    fn browser_detail_index(&self) -> Option<usize> {
+        self.browser_actions()
+            .iter()
+            .position(|(id, _)| Some(*id) == self.browser_detail_id)
+    }
+    fn move_browser_detail(&mut self, forward: bool) {
+        let actions = self.browser_actions();
+        if let Some(index) = self.browser_detail_index() {
+            self.selected = if forward {
+                (index + 1).min(actions.len() - 1)
+            } else {
+                index.saturating_sub(1)
+            };
+            self.browser_detail_id = Some(actions[self.selected].0);
+            self.dialog_scroll = 0;
+        }
+    }
+    fn open_browser_details_at(&mut self, column: u16, row: u16) -> bool {
+        if self.dialog.is_some() || self.approval.is_some() {
+            return false;
+        }
+        let id = self
+            .browser_links
+            .iter()
+            .find(|(rect, _)| rect.contains((column, row).into()))
+            .map(|(_, id)| *id);
+        if let Some(id) = id
+            && let Some(index) = self
+                .browser_actions()
+                .iter()
+                .position(|(action_id, _)| *action_id == id)
+        {
+            self.open_dialog(Dialog::BrowserDetails);
+            self.selected = index;
+            self.browser_detail_id = Some(id);
+            return true;
+        }
+        false
+    }
     fn open_dialog(&mut self, dialog: Dialog) {
         if dialog == Dialog::Profile {
             let p = self
@@ -692,7 +865,14 @@ impl App {
         }
         self.dialog = Some(dialog);
         self.query = Editor::default();
-        self.selected = 0;
+        if self.dialog == Some(Dialog::BrowserDetails) {
+            self.browser_detail_id = self.browser_actions().last().map(|(id, _)| *id);
+        }
+        self.selected = if self.dialog == Some(Dialog::BrowserDetails) {
+            self.browser_actions().len().saturating_sub(1)
+        } else {
+            0
+        };
         self.dialog_scroll = 0;
         self.hits.clear();
         self.more_hits = false;
@@ -776,6 +956,18 @@ impl App {
             self.poll_health();
         }
     }
+    fn request_welcome(&mut self) -> Result<()> {
+        self.save_draft()?;
+        self.return_to_welcome = true;
+        self.quitting = true;
+        if self.job.is_some() {
+            self.stop_agent()?;
+            self.status = "Returning to welcome · finishing the active request safely".into();
+        } else {
+            self.status = "Returning to welcome…".into();
+        }
+        Ok(())
+    }
     fn stop_agent(&mut self) -> Result<()> {
         if let Some(job) = &mut self.job {
             job.stopping = true;
@@ -798,6 +990,7 @@ impl App {
     fn run(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         loop {
             self.poll_job()?;
+            self.poll_clipboard();
             if self.quitting && self.job.is_none() {
                 break;
             }
@@ -884,6 +1077,8 @@ impl App {
                                         self.switch_room(c.room.clone())?;
                                     }
                                 }
+                            } else if layout.welcome.contains((m.column, m.row).into()) {
+                                self.request_welcome()?;
                             } else if layout.menu.contains((m.column, m.row).into()) {
                                 self.open_chat_actions(self.room.clone());
                             } else if layout.stop.contains((m.column, m.row).into())
@@ -899,6 +1094,10 @@ impl App {
                                 && (self.scroll > 0 || self.has_newer)
                             {
                                 self.latest()?;
+                            } else if layout.history.contains((m.column, m.row).into()) {
+                                if !self.copy_message_at(m.column, m.row) {
+                                    self.open_browser_details_at(m.column, m.row);
+                                }
                             } else if layout.group_target.contains((m.column, m.row).into()) {
                                 self.select_recipient(None)?;
                             } else if layout.bot_target.contains((m.column, m.row).into()) {
@@ -964,6 +1163,7 @@ impl App {
     fn key(&mut self, k: KeyEvent) -> Result<bool> {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && k.code == KeyCode::Char('c') {
+            self.return_to_welcome = false;
             return Ok(true);
         }
         if ctrl && k.code == KeyCode::Char('x') {
@@ -1054,6 +1254,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if self.input.text.trim() == "/quit" {
+                    self.return_to_welcome = false;
                     return Ok(true);
                 }
                 self.send_input()?;
@@ -1071,6 +1272,7 @@ impl App {
             KeyCode::F(8) => self.open_dialog(Dialog::Bots),
             KeyCode::F(9) => self.open_dialog(Dialog::Network),
             KeyCode::F(10) => self.cycle_recipient(false)?,
+            KeyCode::F(11) => self.open_dialog(Dialog::BrowserDetails),
             _ => {}
         }
         Ok(false)
@@ -1130,6 +1332,7 @@ impl App {
                 Dialog::Help
                     | Dialog::ModelInfo
                     | Dialog::TaskDetails
+                    | Dialog::BrowserDetails
                     | Dialog::Participants
                     | Dialog::Network
             )
@@ -1232,11 +1435,23 @@ impl App {
         }
         if matches!(
             self.dialog,
-            Some(Dialog::ModelInfo | Dialog::Help | Dialog::Participants | Dialog::Network)
+            Some(
+                Dialog::ModelInfo
+                    | Dialog::Help
+                    | Dialog::Participants
+                    | Dialog::Network
+                    | Dialog::BrowserDetails
+            )
         ) {
             match k.code {
                 KeyCode::PageUp => self.dialog_scroll = self.dialog_scroll.saturating_sub(5),
                 KeyCode::PageDown => self.dialog_scroll = self.dialog_scroll.saturating_add(5),
+                KeyCode::Left if self.dialog == Some(Dialog::BrowserDetails) => {
+                    self.move_browser_detail(false);
+                }
+                KeyCode::Right if self.dialog == Some(Dialog::BrowserDetails) => {
+                    self.move_browser_detail(true);
+                }
                 KeyCode::Char('r')
                     if self.dialog == Some(Dialog::Network) && self.network.is_some() =>
                 {
@@ -1382,6 +1597,14 @@ impl App {
             self.view_archived = archived;
             self.refresh()?;
             self.status = "Archive preference saved · messages and drafts kept".into();
+            return Ok(());
+        }
+        if text == "/welcome" {
+            self.request_welcome()?;
+            return Ok(());
+        }
+        if text == "/browser" {
+            self.open_dialog(Dialog::BrowserDetails);
             return Ok(());
         }
         if text == "/network" {
@@ -1742,7 +1965,11 @@ impl App {
                     Ok(agent::Event::Note(note)) => {
                         self.store.add(&job.room, "tools", &note, "tool")?
                     }
-                    Ok(agent::Event::Approval { command, answer }) => {
+                    Ok(agent::Event::Approval {
+                        command,
+                        answer,
+                        browser,
+                    }) => {
                         // Defence in depth: delegated requests never show or grant approval.
                         if job.stopping || job.requester.is_some() {
                             drop(answer);
@@ -1752,6 +1979,7 @@ impl App {
                             tasks::proposed(self.store.connection(), id, &command)?;
                         }
                         self.approval = Some(Approval {
+                            browser,
                             command,
                             answer,
                             scroll: 0,

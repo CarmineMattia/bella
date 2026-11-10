@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased — 2026-11-09
+## Unreleased — 2026-11-10
+
+- Redesigned first-time setup with a centered responsive form, field hints, click/paste support, visible Open chat and Exit actions, and focus-following layout on short terminals.
+- Added Exit to welcome in chat and /welcome. Returning saves drafts, stops active replies safely, retains already-approved command results and reopens setup with the current profile values.
+
+- Copy buttons on all message headers preserve original text and line breaks; asynchronous native clipboard helpers have an encoded terminal fallback and honest success feedback.
+- Shell tools detach from the chat terminal and use non-interactive sudo. Privilege errors and timeouts get clear diagnostic notices; failure does not disable subsequent owner-approved diagnostic checks.
+- Agent instructions favor inspecting status and crash evidence over starting upgrades or guessing whether an unfamiliar package exists. Output-cap footers now appear only for actual truncation.
+
+## Earlier unreleased changes — 2026-11-09
+
+- Denying a tool action disables all further tools in that request, enforced before argument parsing and approval. Batched calls, later model turns and tool switching cannot prompt again; a new user request has a fresh approval flow.
+
+- Click Details on a browser card to inspect that specific action; selection stays attached to its message ID as history updates. Only visible buttons receive clicks, with scroll, resize and latest-message overlays respected.
+
+- Browser actions now show compact launch-requested, failed or denied cards. F11 or /browser opens launcher diagnostics with Left/Right to browse the loaded chat's actions. Browser approval is explicitly labeled.
+- Website launches use xdg-open; opening the default browser uses its registered launcher without passing about:blank as a file. Explicit X11 sessions propagate their display choice to the launcher.
+- Browser results sent to the agent distinguish launcher acceptance from visual confirmation; nonzero exits and spawn failures are recorded as failures.
 
 - Visible Group/Bot recipient switch beside the composer, F10 cycling and `/to` commands. Plain follow-ups address the selected bot without repeated tags.
 - Recipient selection persists per local owner/chat; explicit bot mentions select that bot for subsequent messages. Named bot routing remains explicit in saved/shared message text.

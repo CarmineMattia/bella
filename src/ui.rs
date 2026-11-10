@@ -28,6 +28,7 @@ pub struct Screen {
     pub footer: Rect,
     pub stop: Rect,
     pub menu: Rect,
+    pub welcome: Rect,
 }
 pub fn screen(area: Rect) -> Screen {
     let side = if area.width >= 76 {
@@ -70,6 +71,11 @@ pub fn screen(area: Rect) -> Screen {
         .intersection(composer),
         send,
         footer: rows[3],
+        welcome: if rows[3].width >= 30 && rows[3].height > 1 {
+            Rect::new(rows[3].right() - 19, rows[3].y + 1, 19, 1)
+        } else {
+            Rect::default()
+        },
         menu: if rows[0].width > 48 {
             Rect::new(rows[0].right() - 36, rows[0].y + 1, 10, 1).intersection(rows[0])
         } else {
@@ -120,6 +126,8 @@ fn time(s: &str) -> &str {
     s.get(11..16).unwrap_or("")
 }
 pub fn draw(app: &mut App, f: &mut Frame) {
+    app.browser_links.clear();
+    app.copy_links.clear();
     let s = screen(f.area());
     fill(f, f.area(), BG);
     if s.sidebar.width > 0 {
@@ -306,7 +314,15 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     );
     text(
         f,
-        inset(row(s.footer, 1), 1),
+        Rect::new(
+            s.footer.x + 1,
+            s.footer.y + 1,
+            s.footer
+                .width
+                .saturating_sub(if s.welcome.is_empty() { 1 } else { 21 }),
+            1,
+        )
+        .intersection(s.footer),
         if s.sidebar.width > 0 {
             "F7 Profile   F8 Bots   F9 Network   F1 Help"
         } else {
@@ -315,6 +331,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         MUTED,
         false,
     );
+    text(f, s.welcome, "[ Exit to welcome ]", ACCENT, true);
     if app.approval.is_some() {
         draw_approval(app, f);
     } else if app.dialog.is_some() {
@@ -463,7 +480,7 @@ fn draw_sidebar(app: &App, f: &mut Frame, area: Rect) {
                 } else {
                     preview_author
                 },
-                single_line(&c.preview)
+                message_preview(&c.preview)
             )
         };
         text(
@@ -588,6 +605,13 @@ fn draw_empty(app: &App, f: &mut Frame, area: Rect) {
 struct HistoryLines {
     lines: Vec<Line<'static>>,
     starts: Vec<(i64, usize)>,
+    action_links: Vec<(i64, usize, usize, usize)>,
+    copy_links: Vec<(i64, usize, usize, usize)>,
+}
+fn message_preview(body: &str) -> String {
+    crate::browser::Action::decode(body)
+        .map(|action| format!("{} · {}", action.title(), single_line(&action.target)))
+        .unwrap_or_else(|| single_line(body))
 }
 fn bubble_lines(app: &App, width: u16) -> HistoryLines {
     let available = width
@@ -597,6 +621,8 @@ fn bubble_lines(app: &App, width: u16) -> HistoryLines {
     let mut lines = vec![];
     let mut date = String::new();
     let mut starts = Vec::new();
+    let mut action_links = Vec::new();
+    let mut copy_links = Vec::new();
     let mut messages = app.messages.clone();
     if let Some(job) = &app.job
         && job.room == app.room
@@ -638,8 +664,15 @@ fn bubble_lines(app: &App, width: u16) -> HistoryLines {
                 m.kind == "bot" || m.kind == "streaming" || m.kind == "interrupted",
             ))
         };
+        let browser_action = (m.kind == "tool")
+            .then(|| crate::browser::Action::decode(&m.body))
+            .flatten();
+        let display_body = browser_action
+            .as_ref()
+            .map(|action| action.summary())
+            .unwrap_or_else(|| m.body.clone());
         let body = wrap_text(
-            &safe(&m.body).replace('\t', "    "),
+            &safe(&display_body).replace('\t', "    "),
             max_bubble.saturating_sub(4).max(1),
         );
         let content_width = body
@@ -647,7 +680,7 @@ fn bubble_lines(app: &App, width: u16) -> HistoryLines {
             .map(|l| l.width())
             .max()
             .unwrap_or(0)
-            .max(author.width())
+            .max(author.width().saturating_add(9))
             .max(if own && app.network.is_some() { 24 } else { 18 })
             .min(max_bubble.saturating_sub(4).max(1));
         let bubble_width = content_width + 4;
@@ -691,9 +724,31 @@ fn bubble_lines(app: &App, width: u16) -> HistoryLines {
                 ),
             ]));
         };
-        add(author, color, true);
+        let details_row = avatar_start + 1 + body.len();
+        let copy_label = match app.copy_feedback {
+            Some((id, when, true)) if id == m.id && when.elapsed().as_secs() < 2 => "[Copied]",
+            Some((id, when, false)) if id == m.id && when.elapsed().as_secs() < 2 => "[ Sent ]",
+            _ => "[ Copy ]",
+        };
+        let copy_width = content_width.min(copy_label.len());
+        let copy_x = content_width.saturating_sub(copy_width);
+        let heading = if content_width >= copy_label.len() + 2 {
+            let name = clip(&author, content_width - copy_label.len() - 1);
+            format!(
+                "{}{}{}",
+                name,
+                " ".repeat(copy_x.saturating_sub(name.width())),
+                copy_label
+            )
+        } else {
+            clip(copy_label, content_width)
+        };
+        add(heading, color, true);
         for line in body {
             add(line, TEXT, false);
+        }
+        if browser_action.is_some() {
+            add("[ Details ]".into(), ACCENT, true);
         }
         let stamp = if m.kind == "interrupted" {
             "interrupted".to_owned()
@@ -723,6 +778,10 @@ fn bubble_lines(app: &App, width: u16) -> HistoryLines {
             MUTED,
             false,
         );
+        copy_links.push((m.id, avatar_start, offset + 2 + copy_x, copy_width));
+        if browser_action.is_some() {
+            action_links.push((m.id, details_row, offset + 2, content_width.min(11)));
+        }
         if has_avatar {
             for (i, picture) in crate::profile_ui::avatar_lines(&profile, 6, 3)
                 .into_iter()
@@ -738,7 +797,12 @@ fn bubble_lines(app: &App, width: u16) -> HistoryLines {
         }
         lines.push(Line::raw(""));
     }
-    HistoryLines { lines, starts }
+    HistoryLines {
+        lines,
+        starts,
+        action_links,
+        copy_links,
+    }
 }
 fn draw_messages(app: &mut App, f: &mut Frame, area: Rect) {
     let history = bubble_lines(app, area.width);
@@ -767,6 +831,32 @@ fn draw_messages(app: &mut App, f: &mut Frame, area: Rect) {
     } else {
         None
     };
+    let links_for = |links: &[(i64, usize, usize, usize)]| -> Vec<(Rect, i64)> {
+        links
+            .iter()
+            .filter_map(|(id, line, x, width)| {
+                let relative = line.checked_sub(start)?;
+                if relative >= area.height as usize
+                    || (relative + 1 == area.height as usize && (app.scroll > 0 || app.has_newer))
+                    || (relative == 0 && app.has_older && start == 0)
+                {
+                    return None;
+                }
+                let rect = Rect::new(
+                    area.x + *x as u16,
+                    area.y + relative as u16,
+                    *width as u16,
+                    1,
+                )
+                .intersection(area);
+                (!rect.is_empty()).then_some((rect, *id))
+            })
+            .collect()
+    };
+    let browser_links = links_for(&history.action_links);
+    let copy_links = links_for(&history.copy_links);
+    app.browser_links = browser_links;
+    app.copy_links = copy_links;
     let visible = history
         .lines
         .into_iter()
@@ -1082,6 +1172,29 @@ fn draw_dialog(app: &App, f: &mut Frame) {
         );
         return;
     }
+    if app.dialog == Some(Dialog::BrowserDetails) {
+        let actions = app.browser_actions();
+        let index = app.browser_detail_index();
+        let body = index.and_then(|index| actions.get(index)).map(|(_, action)| safe(&action.details()))
+            .unwrap_or_else(|| if app.browser_detail_id.is_some() {
+                "This action is no longer in the loaded chat history.\nClose Details and load the relevant messages to inspect it again.".into()
+            } else {
+                "No browser actions in the loaded history of this chat.\nLoad older messages to inspect earlier actions.".into()
+            });
+        draw_info(
+            f,
+            inner,
+            &format!(
+                "Browser details · {} / {}",
+                index.map_or(0, |index| index + 1),
+                actions.len()
+            ),
+            &body,
+            "← / → Action · PgUp/PgDn Scroll · Esc Close",
+            app.dialog_scroll,
+        );
+        return;
+    }
     if app.dialog == Some(Dialog::TaskDetails) {
         if let Some(task) = &app.task_detail {
             let body = format!(
@@ -1185,7 +1298,7 @@ fn draw_dialog(app: &App, f: &mut Frame) {
             f,
             inner,
             "Make yourself at home",
-            "Ctrl+K          Search chats and latest messages\nCtrl+F          Search all messages in this chat\nCtrl+End        Jump to latest messages\nCtrl+N          Create a group\nTab / Shift+Tab Next / previous chat\nClick a chat    Open it\nMouse wheel     Scroll messages\nEnter / Send    Send message\nAlt+Enter       Add a newline\nLeft / Right    Move message cursor\nHome / End      Beginning / end of message\nCtrl+U          Clear draft\nCtrl+R          Retry a failed agent request\nCtrl+X / Stop   Stop the agent response\nF2 / Ctrl+O     Model connection details\nF3 / Right-click Chat options: pin and archive\nF4              Chats / Archive folder\nF5 / /tasks     Agent activity and crash recovery\nF6 / /people    People and local session presence\nF7 / /profile   Edit your name, bio and picture\nF8 / /bots      Create, edit and add bots to this chat\nF9 / /network   Hub connection and outgoing queue\nF10 / Group/Bot Select message recipient (remembered per chat)\n/to group       Return to ordinary group messages\n/to @handle     Address your enabled bot without typing a tag\n@bot task       Ask your agent in a group\n/agent          Open your agent conversation\n/join name      Open or create a group\nCtrl+C / /quit  Quit\n\nMessages are shared locally. Times are UTC.\nEsc closes this window.",
+            "Ctrl+K          Search chats and latest messages\nCtrl+F          Search all messages in this chat\nCtrl+End        Jump to latest messages\nCtrl+N          Create a group\nTab / Shift+Tab Next / previous chat\nClick a chat    Open it\nClick Copy      Copy the full message text\nMouse wheel     Scroll messages\nEnter / Send    Send message\nAlt+Enter       Add a newline\nLeft / Right    Move message cursor\nHome / End      Beginning / end of message\nCtrl+U          Clear draft\nCtrl+R          Retry a failed agent request\nCtrl+X / Stop   Stop the agent response\nF2 / Ctrl+O     Model connection details\nF3 / Right-click Chat options: pin and archive\nF4              Chats / Archive folder\nF5 / /tasks     Agent activity and crash recovery\nF6 / /people    People and local session presence\nF7 / /profile   Edit your name, bio and picture\nF8 / /bots      Create, edit and add bots to this chat\nF9 / /network   Hub connection and outgoing queue\nF10 / Group/Bot Select message recipient (remembered per chat)\nF11 / /browser Browser actions and launcher diagnostics\n/to group       Return to ordinary group messages\n/to @handle     Address your enabled bot without typing a tag\n@bot task       Ask your agent in a group\n/agent          Open your agent conversation\n/welcome        Save draft and return to welcome setup\n/join name      Open or create a group\nCtrl+C / /quit  Quit\n\nMessages are shared locally. Times are UTC.\nEsc closes this window.",
             "PgUp/PgDn Scroll · Esc Close",
             app.dialog_scroll,
         );
@@ -1277,7 +1390,11 @@ fn draw_dialog(app: &App, f: &mut Frame) {
                 format!(
                     "  {}",
                     message_excerpt(
-                        &m.body,
+                        &if m.kind == "tool" {
+                            message_preview(&m.body)
+                        } else {
+                            m.body.clone()
+                        },
                         &app.query.text,
                         inner.width.saturating_sub(4) as usize
                     )
@@ -1334,7 +1451,7 @@ fn draw_dialog(app: &App, f: &mut Frame) {
             text(
                 f,
                 row(rect, 1),
-                format!("  {}", single_line(&c.preview)),
+                format!("  {}", message_preview(&c.preview)),
                 MUTED,
                 false,
             );
@@ -1357,7 +1474,11 @@ fn draw_approval(app: &App, f: &mut Frame) {
     text(
         f,
         row(inner, 0),
-        "Review a shell command",
+        if a.browser {
+            "Browser · Needs approval"
+        } else {
+            "Review a shell command"
+        },
         Color::Yellow,
         true,
     );
@@ -1367,7 +1488,7 @@ fn draw_approval(app: &App, f: &mut Frame) {
         .map(|j| chat_name(&j.room))
         .unwrap_or_default();
     let body = format!(
-        "{}\n\nWorking directory: {}\nResult shared in: {}\n\nRuns as your Linux user, without a sandbox.",
+        "{}\n\nWorking directory: {}\nResult shared in: {}\n\nRuns as your Linux user, without a sandbox.\nNon-interactive: no password input; sudo uses -n.",
         safe(&a.command),
         safe(&app.config.workspace.display().to_string()),
         room

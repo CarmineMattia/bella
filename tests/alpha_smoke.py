@@ -50,6 +50,12 @@ class Terminal:
         x = y = i = 0
         while i < len(value):
             if value[i] == '\x1b':
+                if value.startswith('\x1b]', i):
+                    endings = [(value.find('\x07', i + 2), 1), (value.find('\x1b\\', i + 2), 2)]
+                    endings = [(end, size) for end, size in endings if end >= 0]
+                    if not endings: break
+                    end, size = min(endings)
+                    i = end + size; continue
                 match = re.match(r'\x1b\[([0-9;?]*)([ -/]*)([@-~])', value[i:])
                 if match:
                     params, _, action = match.groups()
@@ -141,19 +147,77 @@ class Alpha(unittest.TestCase):
     def sql(self, sql, params=()):
         with contextlib.closing(sqlite3.connect(self.data)) as db, db:
             return db.execute(sql,params).fetchall()
-    def app(self, name='alice', room='lobby', model=None, launcher=False, first=False):
+    def app(self, name='alice', room='lobby', model=None, launcher=False, first=False, env=None):
         command = [str(OPTIONS.launcher), '--chat-only'] if launcher else [str(OPTIONS.binary)]
         command += ['--data',str(self.data),'--config',str(self.root/'settings.json')]
         if not first: command += ['--name',name]
         if room != 'lobby': command += ['--room',room]
         if model: command += ['--endpoint',model.endpoint,'--model','fixture']
-        terminal = Terminal(command,self.root); self.terminals.append(terminal)
+        terminal = Terminal(command,self.root,env=env); self.terminals.append(terminal)
         if not first: terminal.wait_text('F5 Activity')
         return terminal
     def post(self, room, body, name='bob'):
         subprocess.run([str(OPTIONS.binary),'--data',str(self.data),'--name',name,'--room',room,'--send',body],cwd=self.root,check=True,capture_output=True)
     def model(self,*args):
         model = Model(*args); self.models.append(model); return model
+
+    def test_copy_message_click_preserves_exact_text_with_a_native_helper_fixture(self):
+        helpers = self.root/'helpers'; helpers.mkdir()
+        helper = helpers/'wl-copy'
+        helper.write_text('#!/bin/sh\ncat > "$TERM_SOCIAL_TEST_CLIPBOARD"\n'); helper.chmod(0o700)
+        copied = self.root/'clipboard-text'
+        terminal = self.app(model=self.model('complete'), env={
+            'PATH':str(helpers)+os.pathsep+os.environ.get('PATH',''),
+            'WAYLAND_DISPLAY':'fixture', 'TERM_SOCIAL_TEST_CLIPBOARD':str(copied)})
+        texts = ["hello 界\nsecond line", "```sh\nprintf '%s' \"$HOME\"\n```", "Exit: 1\nsudo: a password is required"]
+        for (author, kind), text in zip([('alice','human'),("alice's bot",'bot'),('tools','tool')], texts):
+            self.sql("INSERT INTO messages(room,author,body,kind) VALUES('lobby',?,?,?)",(author,text,kind))
+        eventually(lambda: terminal.screen().count('[ Copy ]') == 3)
+        buttons = [(i,line.index('[ Copy ]')) for i,line in enumerate(terminal.screen().splitlines()) if '[ Copy ]' in line]
+        for (y,x), text in zip(buttons,texts):
+            terminal.click(x+1,y+1)
+            eventually(lambda: copied.exists() and copied.read_text() == text)
+            terminal.wait_text('Message copied')
+            eventually(lambda: '[Copied]' in terminal.screen().splitlines()[y])
+        terminal.close()
+
+    def test_copy_terminal_fallback_is_encoded_and_does_not_claim_native_success(self):
+        import base64
+        terminal = self.app(model=self.model('complete'),env={'DISPLAY':'','WAYLAND_DISPLAY':''})
+        text = 'hello 界\nexact second line'
+        self.sql("INSERT INTO messages(room,author,body,kind) VALUES('lobby','alice',?,'human')",(text,))
+        terminal.wait_text('[ Copy ]')
+        rows = terminal.screen().splitlines(); y = next(i for i,line in enumerate(rows) if '[ Copy ]' in line); x = rows[y].index('[ Copy ]')
+        terminal.click(x+1,y+1)
+        expected = b'\x1b]52;c;'+base64.b64encode(text.encode())+b'\x1b\\'
+        eventually(lambda: expected in b''.join(terminal.chunks))
+        terminal.wait_text('Copy sent to terminal')
+        self.assertNotIn('Message copied',terminal.screen())
+        terminal.send('still responsive\r')
+        eventually(lambda:self.sql("SELECT 1 FROM messages WHERE body='still responsive'"))
+        terminal.close()
+
+    def test_browser_details_click_opens_the_selected_action_without_executing_tools(self):
+        model = self.model('complete'); terminal = self.app(model=model)
+        for target in ['FIRST', 'SECOND']:
+            record = 'Browser action v1: ' + json.dumps({
+                'state':'launch_requested', 'target':target,
+                'command':'fake-launch-only', 'diagnostics':f'PRIVATE_DIAGNOSTIC_{target}'})
+            self.sql("INSERT INTO messages(room,author,body,kind) VALUES('lobby','tools',?,'tool')", (record,))
+        eventually(lambda: terminal.screen().count('[ Details ]') == 2)
+        rows = terminal.screen().splitlines()
+        y = next(i for i, line in enumerate(rows) if '[ Details ]' in line)
+        x = rows[y].index('[ Details ]')
+        terminal.click(x + 1, y + 1)
+        terminal.wait_text('PRIVATE_DIAGNOSTIC_FIRST')
+        self.assertNotIn('PRIVATE_DIAGNOSTIC_SECOND', terminal.screen())
+        terminal.send('\x1b[C'); terminal.wait_text('PRIVATE_DIAGNOSTIC_SECOND')
+        terminal.send('\x1b'); terminal.send('/browser\r')
+        terminal.wait_text('PRIVATE_DIAGNOSTIC_SECOND')
+        terminal.send('\x1b'); terminal.send('/join another-room\r')
+        eventually(lambda: '[ Details ]' not in terminal.screen())
+        self.assertEqual(model.requests, 0)
+        terminal.close()
 
     def test_profile_pictures_and_named_bots_persist_and_route(self):
         import zlib
@@ -242,6 +306,56 @@ class Alpha(unittest.TestCase):
             with contextlib.closing(sqlite3.connect(expected/'chat.sqlite')) as db:
                 self.assertEqual(db.execute("SELECT body FROM messages WHERE author='portable-user'").fetchone()[0],'portable default data')
             self.assertFalse((portable/'.data').exists())
+
+    def test_welcome_mouse_paste_and_return_button_keep_the_saved_draft(self):
+        terminal = self.app(launcher=True,first=True)
+        terminal.wait_text('Welcome to Term Social')
+        terminal.send('\x15\x1b[200~welcome-user\x1b[201~')
+        rows = terminal.screen().splitlines()
+        y = next(i for i,line in enumerate(rows) if 'Open chat' in line and 'Tab Next' not in line)
+        x = rows[y].index('Open chat')
+        terminal.click(x+1,y+1)
+        terminal.wait_text('F5 Activity')
+        terminal.send('draft survives welcome')
+        eventually(lambda:self.sql("SELECT 1 FROM chat_state WHERE draft='draft survives welcome'"))
+        rows = terminal.screen().splitlines(); y = next(i for i,line in enumerate(rows) if 'Exit to welcome' in line); x = rows[y].index('Exit to welcome')
+        terminal.click(x+1,y+1)
+        terminal.wait_text('Welcome to Term Social')
+        terminal.send('\r')
+        terminal.wait_text('F5 Activity'); terminal.wait_text('draft survives welcome')
+        self.assertEqual(json.loads((self.root/'settings.json').read_text())['name'],'welcome-user')
+        terminal.send('\x15/welcome\r'); terminal.wait_text('Welcome to Term Social')
+        saved = (self.root/'settings.json').read_bytes()
+        terminal.send('\x15do-not-save'); terminal.send('\x1b'); terminal.process.wait(timeout=4)
+        self.assertEqual((self.root/'settings.json').read_bytes(),saved)
+
+    def test_return_to_welcome_stops_an_active_response_before_reopening_setup(self):
+        model = self.model(); terminal = self.app(model=model)
+        terminal.send('/agent\r'); terminal.send('start a reply\r')
+        eventually(lambda:self.sql("SELECT 1 FROM agent_tasks WHERE state='thinking'"))
+        terminal.wait_text('partial text received')
+        rows = terminal.screen().splitlines(); y = next(i for i,line in enumerate(rows) if 'Exit to welcome' in line); x = rows[y].index('Exit to welcome')
+        terminal.click(x+1,y+1)
+        terminal.wait_text('Welcome to Term Social')
+        self.assertTrue(model.disconnected.wait(3))
+        self.assertEqual(self.sql("SELECT state FROM agent_tasks ORDER BY id DESC LIMIT 1")[0][0],'cancelled')
+        self.assertFalse(self.sql("SELECT 1 FROM local_presence"))
+        terminal.send('\x1b'); terminal.process.wait(timeout=4)
+
+    def test_return_to_welcome_waits_for_an_already_approved_command(self):
+        completed = self.root/'completed-command'
+        command = f"sleep .4; printf finished > '{completed}'; printf command-finished"
+        terminal = self.app(model=self.model('tool',command))
+        terminal.send('/agent\r');terminal.send('run the fixture command\r')
+        terminal.wait_text('Review a shell command');terminal.send('y')
+        rows = terminal.screen().splitlines(); y = next(i for i,line in enumerate(rows) if 'Exit to welcome' in line); x = rows[y].index('Exit to welcome')
+        terminal.click(x+1,y+1)
+        terminal.wait_text('Welcome to Term Social')
+        self.assertEqual(completed.read_text(),'finished')
+        self.assertTrue(self.sql("SELECT 1 FROM messages WHERE kind='tool' AND body LIKE '%command-finished%'"))
+        self.assertEqual(self.sql("SELECT state FROM agent_tasks ORDER BY id DESC LIMIT 1")[0][0],'cancelled')
+        self.assertFalse(self.sql("SELECT 1 FROM local_presence"))
+        terminal.send('\x1b');terminal.process.wait(timeout=4)
 
     def test_first_run_saves_settings_and_reuses_them(self):
         terminal = self.app(launcher=True,first=True)

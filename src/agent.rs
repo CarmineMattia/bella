@@ -26,6 +26,7 @@ pub enum Event {
     Delta(String),
     Note(String),
     Approval {
+        browser: bool,
         command: String,
         answer: mpsc::Sender<bool>,
     },
@@ -44,6 +45,9 @@ pub struct Config {
 }
 /// Returned to the model for every tool call in a delegated request.
 pub const TOOLS_DISABLED: &str = "Tools are disabled for delegated requests from other accounts. Nothing was executed. Answer in chat only.";
+/// A refusal closes the tool phase for this request, including differently phrased
+/// commands and switching tools. A fresh user request starts a fresh approval flow.
+const OWNER_DENIED: &str = "The owner denied a tool action. All further tool actions for this request are stopped. Nothing was executed for this call. Answer in chat only; do not retry or switch tools. The owner can send a new message to start a new request.";
 /// System prompt for delegated requests. It discloses nothing about the owner's computer.
 pub const DELEGATED_PROMPT: &str = "You are a bot in a group chat inside a terminal messenger, answering a request from a group member who is not your owner. \
     You have NO tools: you cannot run commands, open a browser, read files or access the owner's computer, and you must not claim otherwise. \
@@ -158,17 +162,18 @@ async fn run(
             },
         );
     }
+    let mut owner_denied = false;
     for _ in 0..6 {
         tx.send(Event::Turn)?;
         tx.send(Event::Phase(Phase::Thinking))?;
         let mut body = json!({"model":config.model,"messages":messages,"max_tokens":1600,"stream":true,
                 "temperature":0.3,"chat_template_kwargs":{"enable_thinking":false}});
-        if config.tools {
+        if config.tools && !owner_denied {
             body["tools"] = json!([{"type":"function","function":{"name":"shell",
-                "description":"Run a shell command after the local owner approves. Output is shared in this conversation. 20 second timeout.",
+                "description":"Run a shell command after the local owner approves. Output is shared in this conversation. Non-interactive: stdin closed, no controlling terminal, sudo uses -n. 20 second timeout. Password authentication must happen in the owner’s own terminal, never in chat.",
                 "parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}}},
                 {"type":"function","function":{"name":"open_browser",
-                "description":"Open the default web browser on the user's computer after owner approval. Omit url to open a blank page; pass an HTTP/HTTPS URL to open a website. This launches a real desktop application, not terminal web browsing.",
+                "description":"Open the default web browser on the user's computer after owner approval. Omit url for the browser configured startup page; pass an HTTP/HTTPS URL to open a website. This launches a real desktop application, not terminal web browsing.",
                 "parameters":{"type":"object","properties":{"url":{"type":"string","description":"Optional HTTP/HTTPS address or about:blank"}},"additionalProperties":false}}}]);
         }
         let response = client
@@ -219,6 +224,9 @@ async fn run(
             let output = if !config.tools {
                 // Delegated request: refuse before parsing arguments; no approval, no execution.
                 TOOLS_DISABLED.to_owned()
+            } else if owner_denied {
+                // Enforce denial before parsing arguments or preparing any local action.
+                OWNER_DENIED.to_owned()
             } else if !matches!(tool_name, Some("shell" | "open_browser")) {
                 "Unsupported tool".to_owned()
             } else {
@@ -227,11 +235,38 @@ async fn run(
                         .and_then(Value::as_str)
                         .unwrap_or("{}"),
                 )?;
-                let command = if tool_name == Some("open_browser") {
-                    if arguments.get("url").is_some_and(|v| !v.is_string()) {
-                        bail!("Browser URL must be a string");
+                let browser_action = tool_name == Some("open_browser");
+                let target = arguments
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .filter(|url| url.trim() != "about:blank")
+                    .unwrap_or("Default browser startup page")
+                    .to_owned();
+                let command = if browser_action {
+                    let proposed = if arguments.get("url").is_some_and(|v| !v.is_string()) {
+                        Err(anyhow::anyhow!("Browser URL must be a string"))
+                    } else {
+                        crate::browser::command(
+                            arguments.get("url").and_then(Value::as_str),
+                            &desktop,
+                        )
+                    };
+                    match proposed {
+                        Ok(command) => command,
+                        Err(error) => {
+                            let output = crate::browser::Action::result(
+                                "Browser request".into(),
+                                "Not executed".into(),
+                                false,
+                                format!("Cannot prepare browser launch: {error:#}"),
+                            )
+                            .record();
+                            tx.send(Event::Note(output.clone()))?;
+                            messages
+                                .push(json!({"role":"tool","tool_call_id":id,"content":output}));
+                            continue;
+                        }
                     }
-                    crate::browser::command(arguments.get("url").and_then(Value::as_str), &desktop)?
                 } else {
                     arguments
                         .get("command")
@@ -243,6 +278,7 @@ async fn run(
                 let (answer, approval) = mpsc::channel();
                 tx.send(Event::Phase(Phase::AwaitingApproval))?;
                 tx.send(Event::Approval {
+                    browser: browser_action,
                     command: command.to_owned(),
                     answer,
                 })?;
@@ -257,7 +293,6 @@ async fn run(
                 };
                 if approved {
                     tx.send(Event::Phase(Phase::RunningCommand))?;
-                    let browser_action = tool_name == Some("open_browser");
                     let command = command.to_owned();
                     let workspace = config.workspace.clone();
                     let tx = tx.clone();
@@ -266,16 +301,34 @@ async fn run(
                         if cancelled.load(Ordering::SeqCst) {
                             bail!("Stopped before shell execution");
                         }
-                        let mut output = execute(&command, &workspace)?;
-                        if browser_action {output.push_str("\nThis is the browser launcher's result, not visual confirmation of a browser window or page.");}
-                        tx.send(Event::Note(format!("Approved shell: {command}\n{output}")))?;
+                        let output = if browser_action {
+                            execute_browser(target, command, &workspace).record()
+                        } else {
+                            format!(
+                                "Approved shell: {command}\n{}",
+                                execute(&command, &workspace)?
+                            )
+                        };
+                        tx.send(Event::Note(output.clone()))?;
                         Ok(output)
                     })
                     .await
                     .context("Shell worker stopped unexpectedly")??
                 } else {
-                    tx.send(Event::Note(format!("Shell request denied: {command}")))?;
-                    "Owner denied this tool request. Do not retry it.".to_owned()
+                    owner_denied = true;
+                    let output = if browser_action {
+                        crate::browser::Action {
+                            state: crate::browser::State::Denied,
+                            target,
+                            command,
+                            diagnostics: OWNER_DENIED.into(),
+                        }
+                        .record()
+                    } else {
+                        format!("Shell request denied: {command}. {OWNER_DENIED}")
+                    };
+                    tx.send(Event::Note(output.clone()))?;
+                    output
                 }
             };
             messages.push(json!({"role":"tool","tool_call_id":id,"content":output}));
@@ -404,28 +457,58 @@ fn read_stream(reader: impl std::io::BufRead, tx: &mpsc::Sender<Event>) -> Resul
     reply.finish()
 }
 
+fn execute_browser(
+    target: String,
+    command: String,
+    workspace: &std::path::Path,
+) -> crate::browser::Action {
+    let (success, diagnostics) = match execute_report(&command, workspace) {
+        Ok(report) => (report.success, report.output),
+        Err(error) => (false, format!("Could not start launcher: {error:#}")),
+    };
+    crate::browser::Action::result(target, command, success, diagnostics)
+}
+
+struct CommandReport {
+    success: bool,
+    output: String,
+}
 fn execute(command: &str, workspace: &std::path::Path) -> Result<String> {
-    // timeout owns a process group; bound output in a reader while draining the full pipe.
-    let mut child = Command::new("timeout")
+    Ok(execute_report(command, workspace)?.output)
+}
+fn execute_report(command: &str, workspace: &std::path::Path) -> Result<CommandReport> {
+    // Detach from the UI's controlling terminal. sudo must never compete with
+    // the chat editor for password input; cached/NOPASSWD authorization still works.
+    let script = format!("sudo() {{ command sudo -n \"$@\"; }}\n{command}");
+    let mut child = Command::new("setsid")
         .args([
+            "--wait",
+            "timeout",
             "--signal=TERM",
             "--kill-after=2s",
             "20s",
             "sh",
             "-c",
-            command,
+            &script,
         ])
         .current_dir(workspace)
+        .env_remove("SUDO_ASKPASS")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
     fn drain(
         mut stream: impl Read + Send + 'static,
-    ) -> (mpsc::Receiver<()>, Arc<std::sync::Mutex<Vec<u8>>>) {
+    ) -> (
+        mpsc::Receiver<()>,
+        Arc<std::sync::Mutex<Vec<u8>>>,
+        Arc<AtomicBool>,
+    ) {
         let (done_tx, done_rx) = mpsc::channel();
         let output = Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = output.clone();
+        let truncated = Arc::new(AtomicBool::new(false));
+        let cap_hit = truncated.clone();
         std::thread::spawn(move || {
             let mut buf = [0; 4096];
             while let Ok(n) = stream.read(&mut buf) {
@@ -434,29 +517,64 @@ fn execute(command: &str, workspace: &std::path::Path) -> Result<String> {
                 }
                 let mut bytes = kept.lock().unwrap();
                 let remaining = 16384usize.saturating_sub(bytes.len());
+                if n > remaining {
+                    cap_hit.store(true, Ordering::Relaxed);
+                }
                 bytes.extend_from_slice(&buf[..n.min(remaining)]);
             }
             let _ = done_tx.send(());
         });
-        (done_rx, output)
+        (done_rx, output, truncated)
     }
-    let (stdout_done, stdout) = drain(child.stdout.take().context("Missing stdout")?);
-    let (stderr_done, stderr) = drain(child.stderr.take().context("Missing stderr")?);
+    let (stdout_done, stdout, stdout_capped) =
+        drain(child.stdout.take().context("Missing stdout")?);
+    let (stderr_done, stderr, stderr_capped) =
+        drain(child.stderr.take().context("Missing stderr")?);
     let status = child.wait()?;
     // A shell may leave background children holding its output pipes. Do not let those
     // children keep the agent task alive beyond the approved command's own exit.
     let stdout_closed = stdout_done.recv_timeout(Duration::from_millis(150)).is_ok();
     let stderr_closed = stderr_done.recv_timeout(Duration::from_millis(150)).is_ok();
-    Ok(format!(
-        "Exit: {status}\n{}\n{}\n[output capped at 16 KiB per stream]{}",
-        String::from_utf8_lossy(&stdout.lock().unwrap()),
-        String::from_utf8_lossy(&stderr.lock().unwrap()),
-        if stdout_closed && stderr_closed {
-            ""
-        } else {
-            "\nOutput pipes are still open; background processes may continue running."
-        }
-    ))
+    let stderr_text = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
+    let lower = stderr_text.to_lowercase();
+    let notice = if matches!(status.code(), Some(124 | 137)) {
+        "Command timed out. Completion was not confirmed; inspect current state before retrying."
+    } else if !status.success()
+        && lower.contains("sudo")
+        && [
+            "password",
+            "terminal",
+            "authentication",
+            "askpass",
+            "sudoers",
+            "not allowed",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        "Administrator authorization required. This chat cannot receive a sudo password. Do not ask for a password in chat or retry the same command. Continue with non-privileged diagnostic checks. If authentication is needed, the owner must handle it in their own terminal."
+    } else if !status.success() {
+        "Command failed. Do not report the task as completed; use the error to choose the next diagnostic check."
+    } else {
+        ""
+    };
+    Ok(CommandReport {
+        success: status.success(),
+        output: format!(
+            "Exit: {status}\n{notice}\n{}\n{stderr_text}{}{}",
+            String::from_utf8_lossy(&stdout.lock().unwrap()),
+            if stdout_capped.load(Ordering::Relaxed) || stderr_capped.load(Ordering::Relaxed) {
+                "\n[output truncated at 16 KiB per stream]"
+            } else {
+                ""
+            },
+            if stdout_closed && stderr_closed {
+                ""
+            } else {
+                "\nOutput pipes are still open; background processes may continue running."
+            }
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -466,6 +584,175 @@ mod tests {
         io::{BufRead, BufReader, Write},
         net::TcpListener,
     };
+
+    #[test]
+    fn browser_execution_distinguishes_acceptance_failure_and_spawn_error() {
+        let workspace = std::env::temp_dir();
+        let run =
+            |command: &str| execute_browser("Test browser".into(), command.into(), &workspace);
+        let accepted = run("printf 'launcher warning' >&2; exit 0");
+        assert_eq!(accepted.state, crate::browser::State::LaunchRequested);
+        assert!(accepted.diagnostics.contains("launcher warning"));
+        assert_eq!(run("exit 3").state, crate::browser::State::Failed);
+        assert_eq!(run("exit 124").state, crate::browser::State::Failed);
+        let failed = execute_browser(
+            "Test".into(),
+            "true".into(),
+            &workspace.join("term-social-missing-workspace-browser-test"),
+        );
+        assert_eq!(failed.state, crate::browser::State::Failed);
+        assert!(failed.diagnostics.contains("Could not start launcher"));
+    }
+
+    #[test]
+    fn sudo_is_noninteractive_and_privilege_failure_is_actionable() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("term-social-sudo-fixture-{}", std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        let fake = root.join("sudo");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nif [ \"$1\" != -n ]; then sleep 3; exit 99; fi\nprintf 'sudo: a password is required\\n' >&2\nexit 1\n",
+        )?;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700))?;
+        let began = std::time::Instant::now();
+        let report = execute_report(
+            &format!("PATH='{}':$PATH; sudo ignored", root.display()),
+            &root,
+        )?;
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "A password-dependent command hung"
+        );
+        assert!(!report.success);
+        assert!(
+            report
+                .output
+                .contains("Administrator authorization required")
+        );
+        assert!(!report.output.contains("background processes"));
+        assert!(!report.output.contains("output truncated"));
+        let detached = execute(
+            "if ( : </dev/tty ) 2>/dev/null; then printf unexpected-tty; else printf no-controlling-terminal; fi",
+            &root,
+        )?;
+        assert!(detached.contains("no-controlling-terminal"));
+        let capped = execute("head -c 17000 /dev/zero | tr '\\000' x", &root)?;
+        assert!(capped.contains("output truncated at 16 KiB"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn failed_command_can_be_followed_by_an_approved_diagnostic() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}/v1", listener.local_addr()?);
+        let server = std::thread::spawn(move || -> Result<Vec<Value>> {
+            let mut bodies = vec![];
+            for turn in 0..3 {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                bodies.push(consume_request(&mut stream)?);
+                let message = match turn {
+                    0 => tool_reply("printf 'sudo: a password is required\\n' >&2; exit 1"),
+                    1 => tool_reply("printf 'read-only diagnostic completed'"),
+                    _ => {
+                        json!({"role":"assistant","content":"Privileged action was blocked; diagnostic completed."})
+                    }
+                };
+                let payload = json!({"choices":[{"message":message}]}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                )?;
+            }
+            Ok(bodies)
+        });
+        let task = start(config(endpoint), Vec::new());
+        let mut approvals = 0;
+        let mut notes = vec![];
+        loop {
+            match task.recv_timeout(Duration::from_secs(10))? {
+                Event::Approval { answer, .. } => {
+                    approvals += 1;
+                    answer.send(true)?;
+                }
+                Event::Note(note) => notes.push(note),
+                Event::Finished(result) => {
+                    assert!(result?.contains("diagnostic completed"));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(approvals, 2);
+        assert!(notes[0].contains("Administrator authorization required"));
+        assert!(notes[1].contains("read-only diagnostic completed"));
+        let bodies = server.join().expect("mock model server")?;
+        assert!(
+            bodies[1].get("tools").is_some(),
+            "Execution failure was confused with owner denial"
+        );
+        assert!(
+            bodies[1]["messages"]
+                .to_string()
+                .contains("non-privileged diagnostic checks")
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the local model; denies the diagnostic command, executes nothing"]
+    fn live_status_request_recovers_from_sudo_failure_with_a_diagnostic_tool() -> Result<()> {
+        let mut cfg = config("http://127.0.0.1:8080/v1".into());
+        cfg.model = "Qwen3.6-35B-A3B-UD-Q4_K_XL".into();
+        cfg.author = "alice's bot".into();
+        let history = vec![
+            Message { id:1, author:"alice".into(), body:"Can you check the status of sudo dnf upgrade --refresh grok-bot because the app keeps crashing?".into(), kind:"human".into(), created_at:String::new() },
+            Message { id:2, author:"tools".into(), body:"Approved shell: sudo dnf upgrade --refresh grok-bot\nExit: exit status: 124\nsudo: unable to read password: Input/output error".into(), kind:"tool".into(), created_at:String::new() },
+            Message { id:3, author:"alice's bot".into(), body:"grok-bot does not appear to be a standard package. Would you like me to run checks?".into(), kind:"bot".into(), created_at:String::new() },
+            Message { id:4, author:"alice".into(), body:"Continue investigating now. First check installed package metadata for grok-bot, using a non-privileged query. Do not run an upgrade, do not ask for a password, and do not just print commands for me to run.".into(), kind:"human".into(), created_at:String::new() },
+        ];
+        let task = start(cfg, history);
+        let mut proposed = false;
+        loop {
+            match task.recv_timeout(Duration::from_secs(60))? {
+                Event::Approval {
+                    command,
+                    answer,
+                    browser,
+                } => {
+                    assert!(!browser);
+                    assert!(!proposed, "Denied action was retried");
+                    let lower = command.to_lowercase();
+                    assert!(
+                        lower.contains("rpm") || lower.contains("dnf"),
+                        "Expected an installed-package query, got {command}"
+                    );
+                    assert!(
+                        !lower.contains("sudo") && !lower.contains("dnf upgrade"),
+                        "Status request proposed another privileged upgrade: {command}"
+                    );
+                    println!("Proposed diagnostic (denied, not executed): {command}");
+                    proposed = true;
+                    answer.send(false)?;
+                }
+                Event::Finished(result) => {
+                    result?;
+                    break;
+                }
+                Event::Cancelled => bail!("Unexpected cancellation"),
+                _ => {}
+            }
+        }
+        assert!(
+            proposed,
+            "The model stopped at suggestions instead of proposing a diagnostic tool"
+        );
+        Ok(())
+    }
 
     fn one_response(message: Value) -> Result<(String, std::thread::JoinHandle<()>)> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -481,7 +768,7 @@ mod tests {
         });
         Ok((endpoint, worker))
     }
-    fn consume_request(stream: &mut std::net::TcpStream) -> Result<()> {
+    fn consume_request(stream: &mut std::net::TcpStream) -> Result<Value> {
         let mut reader = BufReader::new(stream);
         let mut length = 0;
         loop {
@@ -498,7 +785,7 @@ mod tests {
         }
         let mut body = vec![0; length];
         reader.read_exact(&mut body)?;
-        Ok(())
+        Ok(serde_json::from_slice(&body)?)
     }
     fn config(endpoint: String) -> Config {
         Config {
@@ -735,6 +1022,7 @@ mod tests {
                 Event::Approval {
                     command: requested,
                     answer,
+                    ..
                 } => {
                     assert_eq!(requested, command);
                     assert!(!sentinel.exists(), "Command ran before approval");
@@ -761,6 +1049,126 @@ mod tests {
             std::fs::remove_file(sentinel)?;
         }
         Ok(())
+    }
+    fn denial_stops_followup_tools(approve_first: bool) -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}/v1", listener.local_addr()?);
+        let approved_path = std::env::temp_dir().join(format!(
+            "term-social-before-denial-{}-{approve_first}",
+            std::process::id()
+        ));
+        let blocked_path = std::env::temp_dir().join(format!(
+            "term-social-after-denial-{}-{approve_first}",
+            std::process::id()
+        ));
+        let approved_command = format!("printf approved > '{}'", approved_path.display());
+        let blocked_command = format!("printf forbidden > '{}'", blocked_path.display());
+        let server = std::thread::spawn(move || -> Result<Vec<Value>> {
+            let mut bodies = vec![];
+            for turn in 0..3 {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                bodies.push(consume_request(&mut stream)?);
+                let message = match turn {
+                    0 => json!({"role":"assistant","content":null,"tool_calls":[
+                        {"id":"first","type":"function","function":{"name":"shell","arguments":json!({"command":approved_command}).to_string()}},
+                        {"id":"second","type":"function","function":{"name":"shell","arguments":json!({"command":blocked_command}).to_string()}},
+                        {"id":"third","type":"function","function":{"name":"open_browser","arguments":"malformed JSON must never be parsed"}}]}),
+                    1 => json!({"role":"assistant","content":null,"tool_calls":[
+                        {"id":"fourth","type":"function","function":{"name":"shell","arguments":"changed and malformed command"}},
+                        {"id":"fifth","type":"function","function":{"name":"open_browser","arguments":"{\"url\":\"file:///must-not-open\"}"}}]}),
+                    _ => {
+                        json!({"role":"assistant","content":"Actions stopped. I can continue in chat."})
+                    }
+                };
+                let payload = json!({"choices":[{"message":message}]}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                )?;
+            }
+            Ok(bodies)
+        });
+        let task = start(config(endpoint), Vec::new());
+        let mut approvals = 0;
+        let mut notes = vec![];
+        loop {
+            match task.recv_timeout(Duration::from_secs(10))? {
+                Event::Approval { answer, .. } => {
+                    approvals += 1;
+                    assert!(
+                        approvals <= if approve_first { 2 } else { 1 },
+                        "A denied request prompted for another tool"
+                    );
+                    answer.send(approve_first && approvals == 1)?;
+                }
+                Event::Note(note) => notes.push(note),
+                Event::Finished(result) => {
+                    assert_eq!(result?, "Actions stopped. I can continue in chat.");
+                    break;
+                }
+                Event::Cancelled => bail!("Unexpected cancellation"),
+                _ => {}
+            }
+        }
+        assert_eq!(approvals, if approve_first { 2 } else { 1 });
+        assert_eq!(
+            approved_path.exists(),
+            approve_first,
+            "Already approved actions must not be undone"
+        );
+        assert!(!blocked_path.exists(), "A post-denial command ran");
+        assert_eq!(
+            notes.len(),
+            approvals,
+            "Blocked repeats must not spam chat notes"
+        );
+        assert!(notes.last().unwrap().contains(OWNER_DENIED));
+        let bodies = server.join().expect("mock server thread")?;
+        assert!(bodies[0].get("tools").is_some());
+        for body in &bodies[1..] {
+            assert!(
+                body.get("tools").is_none(),
+                "Tools remain advertised after denial"
+            );
+        }
+        let results: Vec<_> = bodies[2]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .collect();
+        assert_eq!(
+            results.len(),
+            5,
+            "Each tool call still needs its correlated result"
+        );
+        for (index, id) in ["first", "second", "third", "fourth", "fifth"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(results[index]["tool_call_id"], *id);
+        }
+        let first_blocked = if approve_first { 2 } else { 1 };
+        assert!(
+            results[first_blocked..]
+                .iter()
+                .all(|result| result["content"] == OWNER_DENIED)
+        );
+        if approve_first {
+            std::fs::remove_file(approved_path)?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn denial_blocks_batched_calls_later_turns_and_tool_switching() -> Result<()> {
+        denial_stops_followup_tools(false)
+    }
+    #[test]
+    fn denial_preserves_previously_approved_output_and_stops_remaining_tools() -> Result<()> {
+        denial_stops_followup_tools(true)
     }
     #[test]
     fn delegated_request_sends_no_tools_and_refuses_tool_calls_without_approval() -> Result<()> {
