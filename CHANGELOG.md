@@ -2,6 +2,10 @@
 
 ## Unreleased — 2026-11-10
 
+- Renamed the project to Bella, after the familiar greeting. The Cargo package and binary are now `bella`; `./start --version` prints `bella 0.1.0-alpha.3`.
+- Installed data and settings now live in `$XDG_DATA_HOME/bella` or `~/.local/share/bella`. If that directory is missing and a leftover `term-social` directory is present, the launcher renames it into place, or copies it when a rename is not possible. A failed copy leaves the original directory untouched and keeps using it. Workspace paths inside `settings.json` that pointed inside the old directory are rewritten to the new location; a workspace outside that directory is left unchanged.
+- Environment variables use the `BELLA_*` prefix, with a temporary fallback to the older `TERM_SOCIAL_*` names when the new variable is unset. `./term-social` and the packaged `bin/term-social` alias remain as a compatibility shim and will be removed in a later release.
+
 - Redesigned first-time setup with a centered responsive form, field hints, click/paste support, visible Open chat and Exit actions, and focus-following layout on short terminals.
 - Added Exit to welcome in chat and /welcome. Returning saves drafts, stops active replies safely, retains already-approved command results and reopens setup with the current profile values.
 

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Temporary compatibility alias. The project is now Bella; this wrapper will be removed in a later release.
+set -euo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec "$root/start" "$@"

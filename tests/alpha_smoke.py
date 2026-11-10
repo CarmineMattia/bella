@@ -8,6 +8,28 @@ import argparse, contextlib, fcntl, http.server, json, os, pathlib, pty, re, shu
 OPTIONS = None
 
 
+def seed_profile(directory, name, message, binary=None):
+    directory = pathlib.Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    workspace = directory / 'workspace'
+    workspace.mkdir(exist_ok=True)
+    settings = directory / 'settings.json'
+    settings.write_text(json.dumps({
+        'name': name,
+        'endpoint': 'http://127.0.0.1:9/v1',
+        'model': 'fixture',
+        'workspace': str(workspace),
+    }))
+    data = directory / 'chat.sqlite'
+    subprocess.run(
+        [str(binary or OPTIONS.binary), '--data', str(data), '--config', str(settings), '--name', name, '--send', message],
+        cwd=directory,
+        check=True,
+        capture_output=True,
+    )
+    return data, settings
+
+
 def eventually(check, seconds=6):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -136,7 +158,7 @@ class Model:
 
 class Alpha(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='term-social-alpha-')
+        self.temporary = tempfile.TemporaryDirectory(prefix='bella-alpha-')
         self.root = pathlib.Path(self.temporary.name); self.data = self.root/'chat.sqlite'; self.terminals = []; self.models = []
     def tearDown(self):
         for terminal in self.terminals:
@@ -164,11 +186,11 @@ class Alpha(unittest.TestCase):
     def test_copy_message_click_preserves_exact_text_with_a_native_helper_fixture(self):
         helpers = self.root/'helpers'; helpers.mkdir()
         helper = helpers/'wl-copy'
-        helper.write_text('#!/bin/sh\ncat > "$TERM_SOCIAL_TEST_CLIPBOARD"\n'); helper.chmod(0o700)
+        helper.write_text('#!/bin/sh\ncat > "$BELLA_TEST_CLIPBOARD"\n'); helper.chmod(0o700)
         copied = self.root/'clipboard-text'
         terminal = self.app(model=self.model('complete'), env={
             'PATH':str(helpers)+os.pathsep+os.environ.get('PATH',''),
-            'WAYLAND_DISPLAY':'fixture', 'TERM_SOCIAL_TEST_CLIPBOARD':str(copied)})
+            'WAYLAND_DISPLAY':'fixture', 'BELLA_TEST_CLIPBOARD':str(copied)})
         texts = ["hello 界\nsecond line", "```sh\nprintf '%s' \"$HOME\"\n```", "Exit: 1\nsudo: a password is required"]
         for (author, kind), text in zip([('alice','human'),("alice's bot",'bot'),('tools','tool')], texts):
             self.sql("INSERT INTO messages(room,author,body,kind) VALUES('lobby',?,?,?)",(author,text,kind))
@@ -286,7 +308,7 @@ class Alpha(unittest.TestCase):
     def test_version_help_and_noninteractive_error_without_rust(self):
         env={**os.environ,'PATH':'/usr/bin:/bin','CARGO_HOME':'/nonexistent','RUSTUP_HOME':'/nonexistent'}
         version=subprocess.run([str(OPTIONS.launcher),'--version'],cwd=self.root,env=env,check=True,capture_output=True,text=True)
-        self.assertEqual(version.stdout.strip(),'term-social 0.1.0-alpha.3')
+        self.assertEqual(version.stdout.strip(),'bella 0.1.0-alpha.3')
         help_text=subprocess.run([str(OPTIONS.launcher),'--help'],cwd=self.root,env=env,check=True,capture_output=True,text=True)
         self.assertIn('--chat-only',help_text.stdout);self.assertIn('--backup',help_text.stdout)
         no_tty=subprocess.run([str(OPTIONS.launcher),'--chat-only','--name','alice','--data',str(self.data)],cwd=self.root,env=env,capture_output=True,text=True)
@@ -296,10 +318,10 @@ class Alpha(unittest.TestCase):
         portable=self.root/'portable app';(portable/'bin').mkdir(parents=True);(portable/'scripts').mkdir()
         shutil.copy2(OPTIONS.launcher,portable/'start')
         shutil.copy2(OPTIONS.launcher.parent/'scripts/launch.py',portable/'scripts/launch.py')
-        (portable/'bin/term-social').symlink_to(OPTIONS.binary)
-        for xdg,home,expected in [(str(self.root/'xdg'),self.root/'home-one',self.root/'xdg/term-social'),('',self.root/'home-two',self.root/'home-two/.local/share/term-social')]:
-            terminal=Terminal([str(portable/'start'),'--chat-only'],self.root,env={'HOME':str(home),'XDG_DATA_HOME':xdg,'TERM_SOCIAL_DATA':'','TERM_SOCIAL_CONFIG':'','TERM_SOCIAL_WORKSPACE':''})
-            self.terminals.append(terminal);terminal.wait_text('Welcome to Term Social');terminal.send('\x15portable-user\r');terminal.wait_text('F5 Activity')
+        (portable/'bin/bella').symlink_to(OPTIONS.binary);(portable/'bin/term-social').symlink_to('bella')
+        for xdg,home,expected in [(str(self.root/'xdg'),self.root/'home-one',self.root/'xdg/bella'),('',self.root/'home-two',self.root/'home-two/.local/share/bella')]:
+            terminal=Terminal([str(portable/'start'),'--chat-only'],self.root,env={'HOME':str(home),'XDG_DATA_HOME':xdg,'BELLA_DATA':'','BELLA_CONFIG':'','BELLA_WORKSPACE':'','TERM_SOCIAL_DATA':'','TERM_SOCIAL_CONFIG':'','TERM_SOCIAL_WORKSPACE':''})
+            self.terminals.append(terminal);terminal.wait_text('Welcome to Bella');terminal.send('\x15portable-user\r');terminal.wait_text('F5 Activity')
             terminal.send('portable default data\r')
             eventually(lambda:(expected/'chat.sqlite').exists() and (expected/'settings.json').exists())
             terminal.close()
@@ -307,9 +329,79 @@ class Alpha(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT body FROM messages WHERE author='portable-user'").fetchone()[0],'portable default data')
             self.assertFalse((portable/'.data').exists())
 
+    def _portable_launcher(self, folder):
+        portable = self.root/folder
+        (portable/'bin').mkdir(parents=True)
+        (portable/'scripts').mkdir()
+        shutil.copy2(OPTIONS.launcher, portable/'start')
+        shutil.copy2(OPTIONS.launcher.parent/'scripts/launch.py', portable/'scripts/launch.py')
+        (portable/'bin/bella').symlink_to(OPTIONS.binary)
+        (portable/'bin/term-social').symlink_to('bella')
+        return portable
+
+    def test_portable_migrates_term_social_data_directory(self):
+        portable = self._portable_launcher('portable-migrate')
+        xdg = self.root/'xdg-migrate'
+        legacy, modern = xdg/'term-social', xdg/'bella'
+        seed_profile(legacy, 'migrated-user', 'kept after rename')
+        terminal = Terminal([str(portable/'start'), '--chat-only'], self.root, env={
+            'HOME': str(self.root/'home-migrate'), 'XDG_DATA_HOME': str(xdg),
+            'BELLA_DATA': '', 'BELLA_CONFIG': '', 'BELLA_WORKSPACE': '',
+            'TERM_SOCIAL_DATA': '', 'TERM_SOCIAL_CONFIG': '', 'TERM_SOCIAL_WORKSPACE': '',
+        })
+        self.terminals.append(terminal)
+        terminal.wait_text('F5 Activity')
+        terminal.wait_text('kept after rename')
+        terminal.close()
+        self.assertTrue((modern/'chat.sqlite').is_file())
+        self.assertTrue((modern/'settings.json').is_file())
+        self.assertFalse(legacy.exists())
+        with contextlib.closing(sqlite3.connect(modern/'chat.sqlite')) as db:
+            self.assertEqual(db.execute("SELECT body FROM messages WHERE author='migrated-user'").fetchone()[0], 'kept after rename')
+
+    def test_portable_keeps_existing_bella_directory_and_leaves_legacy_alone(self):
+        portable = self._portable_launcher('portable-keep')
+        xdg = self.root/'xdg-keep'
+        legacy, modern = xdg/'term-social', xdg/'bella'
+        legacy.mkdir(parents=True)
+        (legacy/'marker').write_text('do-not-touch')
+        seed_profile(modern, 'modern-user', 'already on bella')
+        terminal = Terminal([str(portable/'start'), '--chat-only'], self.root, env={
+            'HOME': str(self.root/'home-keep'), 'XDG_DATA_HOME': str(xdg),
+            'BELLA_DATA': '', 'BELLA_CONFIG': '', 'BELLA_WORKSPACE': '',
+            'TERM_SOCIAL_DATA': '', 'TERM_SOCIAL_CONFIG': '', 'TERM_SOCIAL_WORKSPACE': '',
+        })
+        self.terminals.append(terminal)
+        terminal.wait_text('F5 Activity')
+        terminal.wait_text('already on bella')
+        terminal.close()
+        self.assertEqual((legacy/'marker').read_text(), 'do-not-touch')
+        with contextlib.closing(sqlite3.connect(modern/'chat.sqlite')) as db:
+            self.assertEqual(db.execute("SELECT body FROM messages WHERE author='modern-user'").fetchone()[0], 'already on bella')
+
+    def test_legacy_term_social_data_env_still_selects_the_database(self):
+        custom = self.root/'legacy-env'
+        data, settings = seed_profile(custom, 'legacy-env-user', 'from leftover env')
+        terminal = Terminal([str(OPTIONS.launcher), '--chat-only'], self.root, env={
+            **os.environ,
+            'BELLA_DATA': '', 'BELLA_CONFIG': '', 'BELLA_WORKSPACE': '',
+            'TERM_SOCIAL_DATA': str(data), 'TERM_SOCIAL_CONFIG': str(settings),
+        })
+        self.terminals.append(terminal)
+        terminal.wait_text('F5 Activity')
+        terminal.wait_text('from leftover env')
+        terminal.close()
+
+    def test_temporary_term_social_alias_reports_the_bella_version(self):
+        alias = OPTIONS.launcher.parent/'term-social'
+        self.assertTrue(alias.is_file())
+        env = {**os.environ, 'PATH': '/usr/bin:/bin', 'CARGO_HOME': '/nonexistent', 'RUSTUP_HOME': '/nonexistent'}
+        version = subprocess.run([str(alias), '--version'], cwd=self.root, env=env, check=True, capture_output=True, text=True)
+        self.assertEqual(version.stdout.strip(), 'bella 0.1.0-alpha.3')
+
     def test_welcome_mouse_paste_and_return_button_keep_the_saved_draft(self):
         terminal = self.app(launcher=True,first=True)
-        terminal.wait_text('Welcome to Term Social')
+        terminal.wait_text('Welcome to Bella')
         terminal.send('\x15\x1b[200~welcome-user\x1b[201~')
         rows = terminal.screen().splitlines()
         y = next(i for i,line in enumerate(rows) if 'Open chat' in line and 'Tab Next' not in line)
@@ -320,11 +412,11 @@ class Alpha(unittest.TestCase):
         eventually(lambda:self.sql("SELECT 1 FROM chat_state WHERE draft='draft survives welcome'"))
         rows = terminal.screen().splitlines(); y = next(i for i,line in enumerate(rows) if 'Exit to welcome' in line); x = rows[y].index('Exit to welcome')
         terminal.click(x+1,y+1)
-        terminal.wait_text('Welcome to Term Social')
+        terminal.wait_text('Welcome to Bella')
         terminal.send('\r')
         terminal.wait_text('F5 Activity'); terminal.wait_text('draft survives welcome')
         self.assertEqual(json.loads((self.root/'settings.json').read_text())['name'],'welcome-user')
-        terminal.send('\x15/welcome\r'); terminal.wait_text('Welcome to Term Social')
+        terminal.send('\x15/welcome\r'); terminal.wait_text('Welcome to Bella')
         saved = (self.root/'settings.json').read_bytes()
         terminal.send('\x15do-not-save'); terminal.send('\x1b'); terminal.process.wait(timeout=4)
         self.assertEqual((self.root/'settings.json').read_bytes(),saved)
@@ -336,7 +428,7 @@ class Alpha(unittest.TestCase):
         terminal.wait_text('partial text received')
         rows = terminal.screen().splitlines(); y = next(i for i,line in enumerate(rows) if 'Exit to welcome' in line); x = rows[y].index('Exit to welcome')
         terminal.click(x+1,y+1)
-        terminal.wait_text('Welcome to Term Social')
+        terminal.wait_text('Welcome to Bella')
         self.assertTrue(model.disconnected.wait(3))
         self.assertEqual(self.sql("SELECT state FROM agent_tasks ORDER BY id DESC LIMIT 1")[0][0],'cancelled')
         self.assertFalse(self.sql("SELECT 1 FROM local_presence"))
@@ -350,7 +442,7 @@ class Alpha(unittest.TestCase):
         terminal.wait_text('Review a shell command');terminal.send('y')
         rows = terminal.screen().splitlines(); y = next(i for i,line in enumerate(rows) if 'Exit to welcome' in line); x = rows[y].index('Exit to welcome')
         terminal.click(x+1,y+1)
-        terminal.wait_text('Welcome to Term Social')
+        terminal.wait_text('Welcome to Bella')
         self.assertEqual(completed.read_text(),'finished')
         self.assertTrue(self.sql("SELECT 1 FROM messages WHERE kind='tool' AND body LIKE '%command-finished%'"))
         self.assertEqual(self.sql("SELECT state FROM agent_tasks ORDER BY id DESC LIMIT 1")[0][0],'cancelled')
@@ -359,7 +451,7 @@ class Alpha(unittest.TestCase):
 
     def test_first_run_saves_settings_and_reuses_them(self):
         terminal = self.app(launcher=True,first=True)
-        terminal.wait_text('Welcome to Term Social')
+        terminal.wait_text('Welcome to Bella')
         terminal.send('\x15first-user\r')
         eventually(lambda:(self.root/'settings.json').exists())
         eventually(lambda:self.data.exists() and self.sql("SELECT 1 FROM local_presence WHERE owner='first-user'"))
@@ -369,7 +461,7 @@ class Alpha(unittest.TestCase):
         terminal.close()
         saved=(self.root/'settings.json').read_bytes()
         cancelled=Terminal([str(OPTIONS.launcher),'--chat-only','--setup','--data',str(self.data),'--config',str(self.root/'settings.json')],self.root)
-        self.terminals.append(cancelled);cancelled.wait_text('Welcome to Term Social');cancelled.send('\x15discard-this-name');cancelled.send('\x1b');cancelled.process.wait(timeout=4);cancelled.close(crash=True)
+        self.terminals.append(cancelled);cancelled.wait_text('Welcome to Bella');cancelled.send('\x15discard-this-name');cancelled.send('\x1b');cancelled.process.wait(timeout=4);cancelled.close(crash=True)
         self.assertEqual(cancelled.process.returncode,130);self.assertEqual((self.root/'settings.json').read_bytes(),saved)
         reopened = self.app(launcher=True,first=True)
         reopened.wait_text('saved profile message'); reopened.close()

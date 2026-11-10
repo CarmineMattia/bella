@@ -4,7 +4,7 @@ Test the extracted `0.1.0-alpha.3` package in a UTF-8 terminal, at least 80×24.
 
 ## 1. Package and setup
 
-- Run `./start --version`: expect `term-social 0.1.0-alpha.3`.
+- Run `./start --version`: expect `bella 0.1.0-alpha.3`.
 - Run `./start --help`: launcher and app options are visible.
 - Run `./start --chat-only --data /absolute/path/alpha-test/chat.sqlite` with no existing settings: setup appears. Choose a name and save; reopening the same data path reuses it.
 - Run `./start --setup --data /absolute/path/alpha-test/chat.sqlite` to edit the profile. Cancel and confirm that existing settings remain unchanged.

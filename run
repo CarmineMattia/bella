@@ -14,7 +14,7 @@ if [[ ! -x "$CARGO_HOME/bin/cargo" ]]; then
   echo 'Project toolchain missing. See README.md.' >&2
   exit 1
 fi
-export TERM_SOCIAL_DATA="${TERM_SOCIAL_DATA:-$root/.data/chat.sqlite}"
+export BELLA_DATA="${BELLA_DATA:-${TERM_SOCIAL_DATA:-$root/.data/chat.sqlite}}"
 cd "$root"
 cargo build --quiet --target x86_64-unknown-linux-musl
-exec "$root/target/x86_64-unknown-linux-musl/debug/term-social" "$@"
+exec "$root/target/x86_64-unknown-linux-musl/debug/bella" "$@"

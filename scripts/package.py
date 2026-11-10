@@ -9,10 +9,10 @@ def digest(path):
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('output',type=pathlib.Path,nargs='?',default=ROOT/'dist');args=parser.parse_args()
-    version=tomllib.loads((ROOT/'Cargo.toml').read_text())['package']['version'];tag=f'term-social-{version}-linux-x86_64'
-    binary=ROOT/'target/x86_64-unknown-linux-musl/release/term-social'
+    version=tomllib.loads((ROOT/'Cargo.toml').read_text())['package']['version'];tag=f'bella-{version}-linux-x86_64'
+    binary=ROOT/'target/x86_64-unknown-linux-musl/release/bella'
     actual=subprocess.check_output([binary,'--version'],text=True).strip()
-    if actual!=f'term-social {version}':raise SystemExit(f'Release version mismatch: {actual}')
+    if actual!=f'bella {version}':raise SystemExit(f'Release version mismatch: {actual}')
     output=args.output.expanduser().resolve();output.mkdir(parents=True,exist_ok=True)
     bundle=output/tag
     if bundle.exists():
@@ -21,7 +21,7 @@ def main():
         if not marker.exists() or json.loads(marker.read_text()).get('package')!=tag:raise SystemExit(f'Refusing to replace unrecognized directory: {bundle}')
         shutil.rmtree(bundle)
     (bundle/'bin').mkdir(parents=True);(bundle/'scripts').mkdir();(bundle/'tests').mkdir()
-    shutil.copy2(binary,bundle/'bin/term-social');shutil.copy2(ROOT/'start',bundle/'start')
+    shutil.copy2(binary,bundle/'bin/bella');(bundle/'bin/term-social').symlink_to('bella');shutil.copy2(ROOT/'start',bundle/'start');shutil.copy2(ROOT/'term-social',bundle/'term-social')
     for name in ('launch.py','start-model'):shutil.copy2(ROOT/'scripts'/name,bundle/'scripts'/name)
     for name in ('README.md','CHANGELOG.md','PLAN.md'):shutil.copy2(ROOT/name,bundle/name)
     shutil.copytree(ROOT/'server',bundle/'server',ignore=shutil.ignore_patterns('__pycache__'))
@@ -33,13 +33,13 @@ def main():
     (bundle/'SHA256SUMS').write_text(''.join(f'{digest(p)}  {p.relative_to(bundle).as_posix()}\n' for p in files))
     archive=output/f'{tag}.tar.gz'
     with tarfile.open(archive,'w:gz') as tar:tar.add(bundle,arcname=tag)
-    source=output/f'term-social-{version}-source.tar.gz'
-    names=['Cargo.toml','Cargo.lock','README.md','CHANGELOG.md','PLAN.md','.gitignore','run','start','src','scripts','tests','docs','server']
+    source=output/f'bella-{version}-source.tar.gz'
+    names=['Cargo.toml','Cargo.lock','README.md','CHANGELOG.md','PLAN.md','.gitignore','run','start','term-social','src','scripts','tests','docs','server']
     def filter_source(info):
         if '__pycache__' in pathlib.PurePosixPath(info.name).parts or info.name.endswith('.pyc'):return None
         return info
     with tarfile.open(source,'w:gz') as tar:
-        for name in names:tar.add(ROOT/name,arcname=f'term-social-{version}-source/{name}',filter=filter_source)
+        for name in names:tar.add(ROOT/name,arcname=f'bella-{version}-source/{name}',filter=filter_source)
     (output/'SHA256SUMS').write_text(''.join(f'{digest(p)}  {p.name}\n' for p in (archive,source)))
     print(json.dumps({'runtime_directory':str(bundle),'runtime_archive':str(archive),'source_archive':str(source),'checksums':str(output/'SHA256SUMS')},indent=2))
 if __name__=='__main__':main()

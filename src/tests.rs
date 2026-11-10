@@ -153,9 +153,10 @@ fn text_wrapping_and_input_validation() {
 }
 
 #[test]
-#[ignore = "writes a UI review image source when TERM_SOCIAL_PREVIEW is set"]
+#[ignore = "writes a UI review image source when BELLA_PREVIEW is set"]
 fn ui_preview() -> Result<()> {
-    let path = std::env::var("TERM_SOCIAL_PREVIEW")?;
+    let path = crate::paths::env_var("BELLA_PREVIEW", "TERM_SOCIAL_PREVIEW")
+        .ok_or_else(|| anyhow::anyhow!("BELLA_PREVIEW or TERM_SOCIAL_PREVIEW not set"))?;
     let mut a = app()?;
     a.name = "carmine".into();
     a.store.add(
@@ -189,19 +190,23 @@ fn ui_preview() -> Result<()> {
     a.input = Editor::new("Let's test the message editor next.".into());
     a.health = Some(true);
     a.status = "Messages saved locally · all times UTC".into();
-    if std::env::var("TERM_SOCIAL_PREVIEW_MODE").as_deref() == Ok("options") {
+    if crate::paths::env_var("BELLA_PREVIEW_MODE", "TERM_SOCIAL_PREVIEW_MODE").as_deref()
+        == Some("options")
+    {
         a.store.set_pinned(&a.name, &a.room, true)?;
         a.store.set_archived(&a.name, "weekend plans", true)?;
         a.refresh()?;
         a.open_chat_actions(a.room.clone());
     }
-    if std::env::var("TERM_SOCIAL_PREVIEW_MODE").as_deref() == Ok("search") {
+    if crate::paths::env_var("BELLA_PREVIEW_MODE", "TERM_SOCIAL_PREVIEW_MODE").as_deref()
+        == Some("search")
+    {
         a.open_dialog(Dialog::FindMessages);
         a.query = Editor::new("checklist".into());
         a.update_hits(false)?;
     }
 
-    if let Ok(mode) = std::env::var("TERM_SOCIAL_PREVIEW_MODE")
+    if let Some(mode) = crate::paths::env_var("BELLA_PREVIEW_MODE", "TERM_SOCIAL_PREVIEW_MODE")
         && (mode == "profile" || mode == "bots" || mode == "portraits")
     {
         let mut human = profiles::Profile::user("carmine");
@@ -210,7 +215,7 @@ fn ui_preview() -> Result<()> {
         let mut bot = profiles::Profile::bot("carmine", "bot");
         bot.name = "Orbit".into();
         bot.about = "Your personal assistant".into();
-        if let Ok(path) = std::env::var("TERM_SOCIAL_AVATAR") {
+        if let Some(path) = crate::paths::env_var("BELLA_AVATAR", "TERM_SOCIAL_AVATAR") {
             human.avatar = profiles::import_avatar(&path)?;
             bot.avatar = human.avatar.clone();
         }
@@ -229,11 +234,15 @@ fn ui_preview() -> Result<()> {
             a.open_dialog(Dialog::Bots);
         }
     }
-    if std::env::var("TERM_SOCIAL_PREVIEW_MODE").as_deref() == Ok("recipient") {
+    if crate::paths::env_var("BELLA_PREVIEW_MODE", "TERM_SOCIAL_PREVIEW_MODE").as_deref()
+        == Some("recipient")
+    {
         a.select_recipient(Some("bot".into()))?;
         a.input = Editor::new("Navigate to facebook".into());
     }
-    if std::env::var("TERM_SOCIAL_PREVIEW_MODE").as_deref() == Ok("network") {
+    if crate::paths::env_var("BELLA_PREVIEW_MODE", "TERM_SOCIAL_PREVIEW_MODE").as_deref()
+        == Some("network")
+    {
         network::prepare(&a.store)?;
         let mut net = network::test_connection();
         net.credentials.username = a.name.clone();
@@ -242,7 +251,9 @@ fn ui_preview() -> Result<()> {
         a.network = Some(net);
         a.open_dialog(Dialog::Network);
     }
-    if std::env::var("TERM_SOCIAL_PREVIEW_MODE").as_deref() == Ok("browser") {
+    if crate::paths::env_var("BELLA_PREVIEW_MODE", "TERM_SOCIAL_PREVIEW_MODE").as_deref()
+        == Some("browser")
+    {
         a.store
             .add(&a.room, "carmine", "@bot open https://example.com", "human")?;
         let action = browser::Action::result(
@@ -256,7 +267,9 @@ fn ui_preview() -> Result<()> {
         a.input = Editor::default();
         a.status = "F11 Browser details · launch requested, window unverified".into();
     }
-    if std::env::var("TERM_SOCIAL_PREVIEW_MODE").as_deref() == Ok("copy") {
+    if crate::paths::env_var("BELLA_PREVIEW_MODE", "TERM_SOCIAL_PREVIEW_MODE").as_deref()
+        == Some("copy")
+    {
         a.switch_room("agent:carmine".into())?;
         a.store.add(
             &a.room,
@@ -321,7 +334,7 @@ fn streamed_replies_stay_in_their_origin_chat() -> Result<()> {
 fn live_model_stream_and_approved_shell() -> Result<()> {
     let mut a = app()?;
     a.config.model = "Qwen3.6-35B-A3B-UD-Q4_K_XL".into();
-    a.submit("@bot Use the shell tool to run exactly the command between these backticks: `printf term-social-tool-ok`\nThen reply with the text printed by the tool.".into())?;
+    a.submit("@bot Use the shell tool to run exactly the command between these backticks: `printf bella-tool-ok`\nThen reply with the text printed by the tool.".into())?;
     let deadline = Instant::now() + Duration::from_secs(120);
     let mut approved = false;
     let mut streamed = false;
@@ -331,7 +344,7 @@ fn live_model_stream_and_approved_shell() -> Result<()> {
             streamed |= !job.partial.is_empty();
         }
         if let Some(approval) = &a.approval {
-            assert_eq!(approval.command.trim(), "printf term-social-tool-ok");
+            assert_eq!(approval.command.trim(), "printf bella-tool-ok");
             a.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))?;
             approved = true;
         }
@@ -344,12 +357,12 @@ fn live_model_stream_and_approved_shell() -> Result<()> {
     assert!(
         history
             .iter()
-            .any(|m| m.kind == "tool" && m.body.contains("term-social-tool-ok"))
+            .any(|m| m.kind == "tool" && m.body.contains("bella-tool-ok"))
     );
     assert!(
         history
             .iter()
-            .any(|m| m.kind == "bot" && m.body.contains("term-social-tool-ok")),
+            .any(|m| m.kind == "bot" && m.body.contains("bella-tool-ok")),
         "{history:?}"
     );
     assert!(!history.iter().any(|m| m.kind == "system"), "{history:?}");
@@ -785,7 +798,7 @@ fn bots_creation_validation_room_membership_and_owner_isolation() -> Result<()> 
 }
 #[test]
 fn profile_pictures_decode_validate_survive_backup_and_source_removal() -> Result<()> {
-    let dir = std::env::temp_dir().join(format!("term-social-avatar-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("bella-avatar-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let result = (|| -> Result<()> {
         let png = dir.join("my picture.png");
@@ -1292,8 +1305,7 @@ fn delegated_mentions_need_opt_in_membership_a_fresh_human_author_and_are_decide
 }
 #[test]
 fn lent_bot_answers_a_guest_in_the_group_without_tools_or_private_context() -> Result<()> {
-    let sentinel =
-        std::env::temp_dir().join(format!("term-social-guest-tool-{}", std::process::id()));
+    let sentinel = std::env::temp_dir().join(format!("bella-guest-tool-{}", std::process::id()));
     let command = format!("printf forbidden > '{}'", sentinel.display());
     let (endpoint, server) = mock_model(vec![
         serde_json::json!({"role":"assistant","content":null,"tool_calls":[{"id":"one","type":"function","function":{"name":"shell","arguments":serde_json::json!({"command":command}).to_string()}}]}),

@@ -598,7 +598,7 @@ mod tests {
         let failed = execute_browser(
             "Test".into(),
             "true".into(),
-            &workspace.join("term-social-missing-workspace-browser-test"),
+            &workspace.join("bella-missing-workspace-browser-test"),
         );
         assert_eq!(failed.state, crate::browser::State::Failed);
         assert!(failed.diagnostics.contains("Could not start launcher"));
@@ -607,8 +607,7 @@ mod tests {
     #[test]
     fn sudo_is_noninteractive_and_privilege_failure_is_actionable() -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
-        let root =
-            std::env::temp_dir().join(format!("term-social-sudo-fixture-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("bella-sudo-fixture-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let fake = root.join("sudo");
         std::fs::write(
@@ -862,8 +861,7 @@ mod tests {
     }
     #[test]
     fn cancellation_drops_pending_approval_before_execution() -> Result<()> {
-        let sentinel =
-            std::env::temp_dir().join(format!("term-social-cancelled-{}", std::process::id()));
+        let sentinel = std::env::temp_dir().join(format!("bella-cancelled-{}", std::process::id()));
         let command = format!("printf forbidden > '{}'", sentinel.display());
         let (endpoint, server) = one_response(tool_reply(&command))?;
         let task = start(config(endpoint), Vec::new());
@@ -885,8 +883,7 @@ mod tests {
     }
     #[test]
     fn stopping_during_approved_command_keeps_its_output() -> Result<()> {
-        let sentinel =
-            std::env::temp_dir().join(format!("term-social-running-{}", std::process::id()));
+        let sentinel = std::env::temp_dir().join(format!("bella-running-{}", std::process::id()));
         let command = format!(
             "printf started > '{}'; sleep 0.3; printf command-completed",
             sentinel.display()
@@ -965,7 +962,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let endpoint = format!("http://{}/v1", listener.local_addr()?);
         let sentinel =
-            std::env::temp_dir().join(format!("term-social-tool-{}-{approve}", std::process::id()));
+            std::env::temp_dir().join(format!("bella-tool-{}-{approve}", std::process::id()));
         let command = format!("printf approved > '{}'", sentinel.display());
         let command_copy = command.clone();
         let server = std::thread::spawn(move || -> Result<Value> {
@@ -1054,11 +1051,11 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let endpoint = format!("http://{}/v1", listener.local_addr()?);
         let approved_path = std::env::temp_dir().join(format!(
-            "term-social-before-denial-{}-{approve_first}",
+            "bella-before-denial-{}-{approve_first}",
             std::process::id()
         ));
         let blocked_path = std::env::temp_dir().join(format!(
-            "term-social-after-denial-{}-{approve_first}",
+            "bella-after-denial-{}-{approve_first}",
             std::process::id()
         ));
         let approved_command = format!("printf approved > '{}'", approved_path.display());
@@ -1174,8 +1171,7 @@ mod tests {
     fn delegated_request_sends_no_tools_and_refuses_tool_calls_without_approval() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let endpoint = format!("http://{}/v1", listener.local_addr()?);
-        let sentinel =
-            std::env::temp_dir().join(format!("term-social-delegated-{}", std::process::id()));
+        let sentinel = std::env::temp_dir().join(format!("bella-delegated-{}", std::process::id()));
         let command = format!("printf forbidden > '{}'", sentinel.display());
         let server = std::thread::spawn(move || -> Result<Vec<Value>> {
             let mut bodies = vec![];

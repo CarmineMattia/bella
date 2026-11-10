@@ -110,7 +110,7 @@ Restore with clients closed to the original cache filename for that same hub/acc
 ## Verification and current boundaries
 
 ```bash
-python3 tests/network_smoke.py --binary ./bin/term-social
+python3 tests/network_smoke.py --binary ./bin/bella
 ```
 
 The suite runs two real terminal clients with separate cache files against a loopback HTTP hub. It covers account sign-in/registration, masking and session persistence, owner-enforced bot identity, private-room filtering, public profile/bot sharing, pagination, same-account bootstrap, sign-out, and queue recovery after both hub and client restart. A controlled model verifies that received mentions do not invoke another user's bot without the owner's lending opt-in, and that a lent bot answers a guest with no tool definitions in the model request. These tests do not substitute for trying two physical computers on your LAN.

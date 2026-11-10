@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Term Social alpha launcher.
+"""Bella alpha launcher.
 
 ./start [app options]               Configure once, reuse/start a local model, open chat.
 ./start --chat-only [app options]   Open chat without starting a model.
@@ -21,6 +21,102 @@ import urllib.error, urllib.parse, urllib.request
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = 'Qwen3.6-35B-A3B-UD-Q4_K_XL'
 DEFAULT_ENDPOINT = 'http://127.0.0.1:8080/v1'
+APP_DIRNAME = 'bella'
+LEGACY_APP_DIRNAME = 'term-social'
+
+
+def env_first(*names, default=None):
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return default
+
+
+def user_data_home():
+    xdg = os.environ.get('XDG_DATA_HOME')
+    if xdg and pathlib.Path(xdg).is_absolute():
+        return pathlib.Path(xdg)
+    return pathlib.Path.home() / '.local/share'
+
+
+def remap_inside(path, old_dir, new_dir):
+    try:
+        relative = pathlib.Path(path).expanduser().resolve().relative_to(pathlib.Path(old_dir).resolve())
+    except (ValueError, OSError, RuntimeError):
+        return None
+    return pathlib.Path(new_dir).resolve() / relative
+
+
+def patch_migrated_settings(new_dir, old_dir):
+    """Rewrite a workspace path stored inside the moved settings file."""
+    settings_path = pathlib.Path(new_dir) / 'settings.json'
+    if not settings_path.is_file():
+        return
+    try:
+        data = json.loads(settings_path.read_text())
+    except (OSError, json.JSONDecodeError, TypeError, UnicodeDecodeError):
+        return
+    if not isinstance(data, dict) or not isinstance(data.get('workspace'), str):
+        return
+    mapped = remap_inside(data['workspace'], old_dir, new_dir)
+    if mapped is None:
+        return
+    data['workspace'] = str(mapped)
+    tmp = settings_path.with_name(settings_path.name + '.tmp')
+    try:
+        tmp.write_text(json.dumps(data, indent=2) + '\n')
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, settings_path)
+    except OSError:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+
+
+def migrate_legacy_dir(new_dir, old_dir):
+    """Move leftover Term Social data into the Bella directory once.
+
+    Prefers rename. If rename fails, copies and leaves the old directory intact.
+    On any failure the old directory is kept and returned so user data is not dropped.
+    After a successful move, workspace paths inside settings.json that pointed
+    into the old directory are rewritten to the new location.
+    """
+    new_dir = pathlib.Path(new_dir)
+    old_dir = pathlib.Path(old_dir)
+    if new_dir.exists():
+        return new_dir
+    if not old_dir.exists():
+        return new_dir
+    try:
+        new_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.rename(old_dir, new_dir)
+        patch_migrated_settings(new_dir, old_dir)
+        return new_dir
+    except OSError:
+        pass
+    try:
+        shutil.copytree(old_dir, new_dir, symlinks=True)
+        patch_migrated_settings(new_dir, old_dir)
+        return new_dir
+    except OSError:
+        if new_dir.exists():
+            shutil.rmtree(new_dir, ignore_errors=True)
+        return old_dir
+
+
+def default_installed_dir(*, migrate=True):
+    base = user_data_home()
+    new_dir = base / APP_DIRNAME
+    old_dir = base / LEGACY_APP_DIRNAME
+    if migrate:
+        return migrate_legacy_dir(new_dir, old_dir)
+    return new_dir if new_dir.exists() or not old_dir.exists() else old_dir
+
+
+def default_data_path(*, migrate=True):
+    if (ROOT / 'Cargo.toml').exists():
+        return ROOT / '.data/chat.sqlite'
+    return default_installed_dir(migrate=migrate) / 'chat.sqlite'
 
 
 def process(pid):
@@ -125,11 +221,11 @@ def ensure_model(endpoint, alias, directory, model_path, server, startup_timeout
                 raise RuntimeError('llama-server is not installed. Set LLAMA_SERVER or use --server FILE. Chat can run without it.')
             model_path = pathlib.Path(model_path).expanduser().resolve()
             if not model_path.is_file():
-                raise RuntimeError(f'Installed model not found: {model_path}. Use --model-path FILE or TERM_SOCIAL_MODEL_PATH.')
+                raise RuntimeError(f'Installed model not found: {model_path}. Use --model-path FILE or BELLA_MODEL_PATH (TERM_SOCIAL_MODEL_PATH still works).')
             log_path = directory / 'model.log'
             if log_path.exists() and log_path.stat().st_size > 10 * 1024 * 1024:
                 os.replace(log_path, directory / 'model.previous.log')
-            argv = [executable, '-m', str(model_path), '--alias', alias, '--host', '127.0.0.1', '--port', str(parsed.port or 80), '-c', os.environ.get('TERM_SOCIAL_MODEL_CONTEXT', '8192'), '-ngl', os.environ.get('TERM_SOCIAL_MODEL_GPU_LAYERS', '99'), '--flash-attn', 'on', '--jinja']
+            argv = [executable, '-m', str(model_path), '--alias', alias, '--host', '127.0.0.1', '--port', str(parsed.port or 80), '-c', env_first('BELLA_MODEL_CONTEXT', 'TERM_SOCIAL_MODEL_CONTEXT', default='8192'), '-ngl', env_first('BELLA_MODEL_GPU_LAYERS', 'TERM_SOCIAL_MODEL_GPU_LAYERS', default='99'), '--flash-attn', 'on', '--jinja']
             with open(log_path, 'ab') as log:
                 os.chmod(log_path, 0o600)
                 child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
@@ -163,7 +259,7 @@ def main(argv=None):
     mode.add_argument('--chat-only', action='store_true')
     mode.add_argument('--model-only', action='store_true')
     mode.add_argument('--stop-model', action='store_true')
-    parser.add_argument('--model-path', default=os.environ.get('TERM_SOCIAL_MODEL_PATH', str(pathlib.Path.home() / 'models' / DEFAULT_MODEL / f'{DEFAULT_MODEL}.gguf')))
+    parser.add_argument('--model-path', default=env_first('BELLA_MODEL_PATH', 'TERM_SOCIAL_MODEL_PATH', default=str(pathlib.Path.home() / 'models' / DEFAULT_MODEL / f'{DEFAULT_MODEL}.gguf')))
     parser.add_argument('--server', default=os.environ.get('LLAMA_SERVER'))
     parser.add_argument('--startup-timeout', type=float, default=90)
     launch, app_args = parser.parse_known_args(argv)
@@ -174,17 +270,23 @@ def main(argv=None):
         options.add_argument('--' + field)
     options.add_argument('--setup', action='store_true')
     profile_args, _ = options.parse_known_args(app_args)
-    binary = next((p for p in (ROOT/'bin/term-social', ROOT/'target/x86_64-unknown-linux-musl/release/term-social', ROOT/'target/x86_64-unknown-linux-musl/debug/term-social') if p.is_file()), None)
+    binary = next((p for p in (
+        ROOT/'bin/bella',
+        ROOT/'bin/term-social',  # temporary compatibility alias
+        ROOT/'target/x86_64-unknown-linux-musl/release/bella',
+        ROOT/'target/x86_64-unknown-linux-musl/debug/bella',
+        ROOT/'target/x86_64-unknown-linux-musl/release/term-social',
+        ROOT/'target/x86_64-unknown-linux-musl/debug/term-social',
+    ) if p.is_file()), None)
     if binary is None:
         raise RuntimeError('App binary not found. From source, run ./scripts/build-alpha. Use the extracted alpha package to run without Rust.')
     if '--help' in app_args or '-h' in app_args:
         print(__doc__, flush=True)
         return subprocess.call([str(binary), '--help'])
-    xdg = os.environ.get('XDG_DATA_HOME')
-    user_data = pathlib.Path(xdg) if xdg and pathlib.Path(xdg).is_absolute() else pathlib.Path.home()/'.local/share'
-    data = pathlib.Path(profile_args.data or os.environ.get('TERM_SOCIAL_DATA') or (str(ROOT/'.data/chat.sqlite') if (ROOT/'Cargo.toml').exists() else str(user_data/'term-social/chat.sqlite'))).expanduser().resolve()
-    config = pathlib.Path(profile_args.config or os.environ.get('TERM_SOCIAL_CONFIG') or data.parent/'settings.json').expanduser().resolve()
-    env = {**os.environ, 'TERM_SOCIAL_DATA':str(data), 'TERM_SOCIAL_CONFIG':str(config)}
+    inspect_only = any(flag in app_args for flag in ('--version', '-V', '--help', '-h'))
+    data = pathlib.Path(profile_args.data or env_first('BELLA_DATA', 'TERM_SOCIAL_DATA') or str(default_data_path(migrate=not inspect_only))).expanduser().resolve()
+    config = pathlib.Path(profile_args.config or env_first('BELLA_CONFIG', 'TERM_SOCIAL_CONFIG') or data.parent/'settings.json').expanduser().resolve()
+    env = {**os.environ, 'BELLA_DATA':str(data), 'BELLA_CONFIG':str(config), 'TERM_SOCIAL_DATA':str(data), 'TERM_SOCIAL_CONFIG':str(config)}
     headless = any(flag in app_args for flag in ('--version','-V','--send','--history','--doctor','--backup','--setup-only','--network-logout'))
     if '--version' not in app_args and '-V' not in app_args:
         data.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -194,9 +296,10 @@ def main(argv=None):
         return 0
     if not headless and not launch.model_only and (not sys.stdin.isatty() or not sys.stdout.isatty()):
         raise RuntimeError('Chat needs an interactive terminal. Headless options include --model-only, --send, --history, --doctor and --backup.')
-    if not config.exists() and not profile_args.workspace and not env.get('TERM_SOCIAL_WORKSPACE') and not headless:
+    if not config.exists() and not profile_args.workspace and not env_first('BELLA_WORKSPACE', 'TERM_SOCIAL_WORKSPACE') and not headless:
         workspace = data.parent/'workspace'
         workspace.mkdir(parents=True, exist_ok=True)
+        env['BELLA_WORKSPACE'] = str(workspace)
         env['TERM_SOCIAL_WORKSPACE'] = str(workspace)
     if not headless and not launch.model_only and (profile_args.setup or (not config.exists() and not profile_args.name)):
         setup_args = [v for v in app_args if v != '--setup']
@@ -231,5 +334,5 @@ if __name__ == '__main__':
         print('\nStartup cancelled.', file=sys.stderr)
         raise SystemExit(130)
     except (OSError, RuntimeError, ValueError) as error:
-        print(f'Term Social launcher: {error}', file=sys.stderr)
+        print(f'Bella launcher: {error}', file=sys.stderr)
         raise SystemExit(1)

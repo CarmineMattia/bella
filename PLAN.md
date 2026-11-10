@@ -1,6 +1,6 @@
 # Product direction
 
-A decentralized terminal messenger where humans and personal AI agents are first-class participants. One command opens the app. Each owner runs their own agent, preferably with free local inference, and controls what it can do on their devices.
+The project is called Bella. A decentralized terminal messenger where humans and personal AI agents are first-class participants. One command opens the app. Each owner runs their own agent, preferably with free local inference, and controls what it can do on their devices.
 
 The terminal is the primary interface for chats, groups, tools, approvals, model setup, and settings. Rust/Ratatui is the starting UI stack. Linux first, Android later with a native device-control bridge. This is a new project; Rakijazios is abandoned as the foundation because its centralized architecture does not fit. No old repositories are deleted.
 
@@ -32,7 +32,7 @@ Onboarding, participant discovery, launcher-owned model lifecycle and durable ta
 
 ## Next milestones
 
-1. Gather alpha feedback and harden usability: grapheme editing, large-history memory bounds, authenticated model endpoints, hardware-aware model setup and additional terminal platforms. Select a permanent name. Durable task scheduling/replay remains a separate design decision requiring explicit authorization semantics.
+1. Gather alpha feedback and harden usability: grapheme editing, large-history memory bounds, authenticated model endpoints, hardware-aware model setup and additional terminal platforms. Durable task scheduling/replay remains a separate design decision requiring explicit authorization semantics.
 2. Evaluate Pi against the initial agent adapter using the same model and tasks. Retain application-owned tool permissions and prevent bypass through unrestricted built-in tools or extensions.
 3. Introduce cryptographic identity and explicit group membership. Replace shared-database transport with encrypted peer connections, evaluating iroh. Add invitations, message IDs, deduplication, synchronization, and reconnect handling. Test on distinct networks; document relays and offline delivery assumptions.
 4. Add owner/delegate policies for cross-participant requests. Separate reading from disclosure, bind approvals to exact requests, and prevent agents from approving their own actions. Bound bot-to-bot exchanges. **Partial (2026-11-09):** opt-in, chat-only bot lending. The owner's device answers guest mentions with tools disabled, group-only context, a per-guest hourly limit, a recorded requester, and bot authors ignored. Still open: any tool use for guests (approval bound to the exact guest request, sandboxing), separating reading from disclosure, synced or multi-device quotas, and encryption.
@@ -41,7 +41,7 @@ Onboarding, participant discovery, launcher-owned model lifecycle and durable ta
 
 ## Deliberately open choices
 
-Permanent product name; final harness; model and routing strategy; networking/synchronization protocol; offline storage policy; Android runtime. iroh connectivity does not supply messaging semantics automatically. Relay infrastructure can be community-operated but cannot be assumed unnecessary.
+Final harness; model and routing strategy; networking/synchronization protocol; offline storage policy; Android runtime. iroh connectivity does not supply messaging semantics automatically. Relay infrastructure can be community-operated but cannot be assumed unnecessary.
 
 ## Network alpha.3 milestone — 2026-11-04
 

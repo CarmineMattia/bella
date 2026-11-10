@@ -9,7 +9,7 @@ def main():
     parser.add_argument('--endpoint',default='http://127.0.0.1:8080/v1')
     parser.add_argument('--model',default='Qwen3.6-35B-A3B-UD-Q4_K_XL')
     args=parser.parse_args();launcher=args.launcher.resolve()
-    with tempfile.TemporaryDirectory(prefix='term-social-live-alpha-') as directory:
+    with tempfile.TemporaryDirectory(prefix='bella-live-alpha-') as directory:
         root=pathlib.Path(directory);data=root/'chat.sqlite'
         def query(sql):
             with contextlib.closing(sqlite3.connect(data)) as db:return db.execute(sql).fetchall()

@@ -6,8 +6,8 @@ OPTIONS=None
 
 class Network(unittest.TestCase):
     def setUp(self):
-        self.temp=tempfile.TemporaryDirectory(prefix='term-social-network-');self.root=pathlib.Path(self.temp.name)
-        spec=importlib.util.spec_from_file_location('term_social_hub',OPTIONS.hub);self.hubmodule=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.hubmodule)
+        self.temp=tempfile.TemporaryDirectory(prefix='bella-network-');self.root=pathlib.Path(self.temp.name)
+        spec=importlib.util.spec_from_file_location('bella_hub',OPTIONS.hub);self.hubmodule=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.hubmodule)
         self.db=self.root/'server.sqlite';self.hubmodule.initialize(self.db)
         self.terminals=[];self.models=[];self.port=0;self.start_hub()
     def start_hub(self):
@@ -144,7 +144,7 @@ class Network(unittest.TestCase):
         self.assertEqual(self.call('/me',token=alice['token'])[0],401)
 
     def test_real_terminal_registration_masking_and_saved_session(self):
-        terminal=self.connect('newuser');terminal.wait_text('Connect to Term Social hub')
+        terminal=self.connect('newuser');terminal.wait_text('Connect to Bella hub')
         terminal.send('\x15'+self.url+'\tnewuser\ttest-password-123\tfixture-invite')
         self.assertNotIn('test-password-123',terminal.screen());self.assertNotIn('fixture-invite',terminal.screen())
         terminal.send('\x12');terminal.wait_text('F5 Activity')

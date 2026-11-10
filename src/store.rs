@@ -249,7 +249,7 @@ mod tests {
     use super::*;
     #[test]
     fn backup_includes_wal_messages_and_preferences_and_refuses_overwrite() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("term-social-backup-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("bella-backup-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let original = Store::open(&root.join("original.sqlite"))?;
         original.add("room", "alice", "saved in WAL", "human")?;
@@ -267,10 +267,8 @@ mod tests {
     #[test]
     fn pin_and_archive_preferences_are_per_user_and_persist_without_touching_chat_state()
     -> Result<()> {
-        let path = std::env::temp_dir().join(format!(
-            "term-social-preferences-{}.sqlite",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("bella-preferences-{}.sqlite", std::process::id()));
         let store = Store::open(&path)?;
         store.add("older", "bob", "keep this old message", "human")?;
         store.add("newer", "bob", "new message", "human")?;
@@ -308,10 +306,8 @@ mod tests {
     }
     #[test]
     fn upgrades_the_original_database_without_losing_messages() -> Result<()> {
-        let path = std::env::temp_dir().join(format!(
-            "term-social-migration-{}.sqlite",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("bella-migration-{}.sqlite", std::process::id()));
         let old = Connection::open(&path)?;
         old.execute_batch("CREATE TABLE messages (id INTEGER PRIMARY KEY, room TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, kind TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
           INSERT INTO messages VALUES (17,'existing','bob','keep this message','human','2026-10-23 18:00:00');")?;
@@ -329,7 +325,7 @@ mod tests {
     }
     #[test]
     fn shared_messages_unread_drafts_and_empty_groups_survive_reopen() -> Result<()> {
-        let path = std::env::temp_dir().join(format!("term-social-{}.sqlite", std::process::id()));
+        let path = std::env::temp_dir().join(format!("bella-{}.sqlite", std::process::id()));
         let a = Store::open(&path)?;
         let b = Store::open(&path)?;
         a.ensure_room("empty")?;

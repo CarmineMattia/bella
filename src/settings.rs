@@ -283,7 +283,7 @@ fn draw_setup(frame: &mut ratatui::Frame, form: &SetupForm) -> SetupHits {
     let mut hits = SetupHits::default();
     if area.width < 22 || area.height < 8 {
         frame.render_widget(
-            Paragraph::new("Term Social\nResize to continue\nEsc exits")
+            Paragraph::new("Bella\nResize to continue\nEsc exits")
                 .style(Style::default().fg(ACCENT)),
             area,
         );
@@ -310,7 +310,7 @@ fn draw_setup(frame: &mut ratatui::Frame, form: &SetupForm) -> SetupHits {
         setup_text(
             frame,
             Rect::new(hero.x, hero.y + 1, hero.width, 1),
-            "T E R M   S O C I A L",
+            "B E L L A",
             ACCENT,
             true,
         );
@@ -344,9 +344,9 @@ fn draw_setup(frame: &mut ratatui::Frame, form: &SetupForm) -> SetupHits {
         frame,
         Rect::new(form_area.x, form_area.y, form_area.width, 1),
         if form_area.width >= 30 {
-            "Welcome to Term Social"
+            "Welcome to Bella"
         } else {
-            "Term Social setup"
+            "Bella setup"
         },
         TEXT,
         true,
@@ -575,10 +575,8 @@ mod tests {
             &hits,
         );
         assert_eq!(form.selected, 2);
-        let root = std::env::temp_dir().join(format!(
-            "term-social-welcome-validation-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("bella-welcome-validation-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let path = root.join("settings.json");
         form.fields[0] = Editor::default();
@@ -614,10 +612,11 @@ mod tests {
         Ok(())
     }
     #[test]
-    #[ignore = "writes a welcome screen preview only when TERM_SOCIAL_PREVIEW is provided"]
+    #[ignore = "writes a welcome screen preview only when BELLA_PREVIEW is provided"]
     fn welcome_preview() -> Result<()> {
         use ratatui::{Terminal, backend::TestBackend};
-        let path = std::env::var("TERM_SOCIAL_PREVIEW")?;
+        let path = crate::paths::env_var("BELLA_PREVIEW", "TERM_SOCIAL_PREVIEW")
+            .ok_or_else(|| anyhow::anyhow!("BELLA_PREVIEW or TERM_SOCIAL_PREVIEW not set"))?;
         let form = SetupForm::new(fixture());
         let mut terminal = Terminal::new(TestBackend::new(128, 40))?;
         terminal.draw(|frame| {
@@ -636,7 +635,7 @@ mod tests {
     }
     #[test]
     fn settings_roundtrip_validation_and_backup() -> Result<()> {
-        let dir = std::env::temp_dir().join(format!("term-social-settings-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bella-settings-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("settings.json");
         let mut s = Settings {

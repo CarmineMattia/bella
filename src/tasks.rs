@@ -250,10 +250,8 @@ mod tests {
     }
     #[test]
     fn requester_column_is_added_to_existing_databases() -> Result<()> {
-        let path = std::env::temp_dir().join(format!(
-            "term-social-requester-{}.sqlite",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("bella-requester-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let old = Connection::open(&path)?;

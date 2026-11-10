@@ -1,4 +1,4 @@
-# Term Social alpha user guide
+# Bella alpha user guide
 
 ## Profiles and startup
 
@@ -6,7 +6,7 @@ Run `./start` from the extracted package. On first launch, set a local account I
 
 `./start --setup` reopens setup. CLI `--name`, `--model`, `--endpoint`, and `--workspace` temporarily override saved values. They are saved only when you explicitly use setup. Distinct account IDs have distinct drafts, read state, pins, archives, and agent activity. Two processes using the same account ID share that profile's state; IDs are not passwords or verified identities. Changing the ID in setup selects another local profile; use F7 to change only its display name.
 
-The source-tree launcher defaults to `.data/chat.sqlite`. The extracted package defaults to `$XDG_DATA_HOME/term-social/chat.sqlite`, or `~/.local/share/term-social/chat.sqlite` when XDG_DATA_HOME is unset. `--data PATH` overrides it. `--config PATH` selects another settings file. Keep settings and database paths different. To continue an existing source-tree conversation from the package, explicitly pass that source database's absolute path.
+The source-tree launcher defaults to `.data/chat.sqlite`. The extracted package defaults to `$XDG_DATA_HOME/bella/chat.sqlite`, or `~/.local/share/bella/chat.sqlite` when XDG_DATA_HOME is unset. If the `bella` directory does not exist and a leftover `term-social` directory is present in the same parent, the launcher moves it once (it copies if a rename is not possible, and never deletes the original data if that fails). If `settings.json` stored a workspace inside that old directory, the path is updated; a workspace kept elsewhere is left unchanged. `--data PATH` or `BELLA_DATA` overrides the database path. `--config PATH` or `BELLA_CONFIG` selects another settings file. The older `TERM_SOCIAL_DATA` and `TERM_SOCIAL_CONFIG` names still work when the matching `BELLA_*` variable is unset; this compatibility is temporary. Keep settings and database paths different. To continue an existing source-tree conversation from the package, explicitly pass that source database's absolute path. `./term-social` and the packaged `bin/term-social` are temporary aliases for Bella and will be removed in a later release.
 
 ## Model startup
 
@@ -19,9 +19,9 @@ The launcher checks `/models` before starting anything. It reuses an endpoint th
 ./start --stop-model
 ```
 
-Custom `--model-path` and `--server` startup overrides are not saved in the chat profile. Pass them again on future cold starts, or export `TERM_SOCIAL_MODEL_PATH` and `LLAMA_SERVER`. The model alias and endpoint can be saved through setup.
+Custom `--model-path` and `--server` startup overrides are not saved in the chat profile. Pass them again on future cold starts, or export `BELLA_MODEL_PATH` (or the temporary `TERM_SOCIAL_MODEL_PATH`) and `LLAMA_SERVER`. The model alias and endpoint can be saved through setup.
 
-Startup defaults: context 8192, GPU layers 99, flash attention on, a 90-second startup deadline. Override with `TERM_SOCIAL_MODEL_CONTEXT`, `TERM_SOCIAL_MODEL_GPU_LAYERS`, and `--startup-timeout SECONDS`. Different hardware may need lower GPU layers or a smaller GGUF. The alpha does not download weights or choose a model based on hardware.
+Startup defaults: context 8192, GPU layers 99, flash attention on, a 90-second startup deadline. Override with `BELLA_MODEL_CONTEXT`, `BELLA_MODEL_GPU_LAYERS` (or the temporary `TERM_SOCIAL_MODEL_*` names), and `--startup-timeout SECONDS`. Different hardware may need lower GPU layers or a smaller GGUF. The alpha does not download weights or choose a model based on hardware.
 
 One launcher-owned model is managed per configuration directory. A model started by the launcher has its own process group, a process-identity record, and a log beside the settings file: `model-process.json`, `model.lock`, and `model.log`. It stays running when a chat exits. `--stop-model` uses the saved PID **and Linux process-start identity**, executable, and process group; it does not stop a server it merely discovered. Model startup failures are reported before chat opens, and `--model-only` returns nonzero on failure.
 

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Run the existing local model; no downloads and no paid API.
 set -euo pipefail
-model_path="${TERM_SOCIAL_MODEL_PATH:-$HOME/models/Qwen3.6-35B-A3B-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf}"
-model_alias="${TERM_SOCIAL_MODEL_ALIAS:-Qwen3.6-35B-A3B-UD-Q4_K_XL}"
+model_path="${BELLA_MODEL_PATH:-${TERM_SOCIAL_MODEL_PATH:-$HOME/models/Qwen3.6-35B-A3B-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf}}"
+model_alias="${BELLA_MODEL_ALIAS:-${TERM_SOCIAL_MODEL_ALIAS:-Qwen3.6-35B-A3B-UD-Q4_K_XL}}"
 server="${LLAMA_SERVER:-$(command -v llama-server || true)}"
 if [[ -z "$server" || ! -x "$server" ]]; then
   echo 'llama-server not found. Set LLAMA_SERVER to its executable path.' >&2
   exit 1
 fi
 if [[ ! -f "$model_path" ]]; then
-  echo "Model not found: $model_path. Set TERM_SOCIAL_MODEL_PATH to an installed GGUF file." >&2
+  echo "Model not found: $model_path. Set BELLA_MODEL_PATH (or TERM_SOCIAL_MODEL_PATH) to an installed GGUF file." >&2
   exit 1
 fi
 exec "$server" -m "$model_path" --alias "$model_alias" --host 127.0.0.1 \
-  --port "${TERM_SOCIAL_MODEL_PORT:-8080}" -c "${TERM_SOCIAL_MODEL_CONTEXT:-8192}" \
-  -ngl "${TERM_SOCIAL_MODEL_GPU_LAYERS:-99}" --flash-attn on --jinja
+  --port "${BELLA_MODEL_PORT:-${TERM_SOCIAL_MODEL_PORT:-8080}}" -c "${BELLA_MODEL_CONTEXT:-${TERM_SOCIAL_MODEL_CONTEXT:-8192}}" \
+  -ngl "${BELLA_MODEL_GPU_LAYERS:-${TERM_SOCIAL_MODEL_GPU_LAYERS:-99}}" --flash-attn on --jinja

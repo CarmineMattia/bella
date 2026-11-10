@@ -166,7 +166,7 @@ pub fn login(path: &Path, force: bool) -> Result<Option<Credentials>> {
         loop {
             terminal.draw(|f|{
             let r=f.area().inner(Margin::new(2,1));
-            f.render_widget(Paragraph::new("Connect to Term Social hub\nEnter signs in · Ctrl+R creates an account · Esc cancels").style(Style::default().fg(Color::Cyan)),Rect::new(r.x,r.y,r.width,2).intersection(r));
+            f.render_widget(Paragraph::new("Connect to Bella hub\nEnter signs in · Ctrl+R creates an account · Esc cancels").style(Style::default().fg(Color::Cyan)),Rect::new(r.x,r.y,r.width,2).intersection(r));
             for (i,title) in ["Hub URL","Account ID (lowercase letters, digits, underscores)","Password (at least 8 bytes)","Registration invite (only for a new account)"].iter().enumerate(){
                 let y=r.y+3+i as u16*3;
                 f.render_widget(Paragraph::new(*title).style(Style::default().fg(if i==selected{Color::Cyan}else{Color::Gray})),Rect::new(r.x,y,r.width,1).intersection(r));

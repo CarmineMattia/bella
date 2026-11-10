@@ -1,6 +1,6 @@
-# Term Social — 0.1.0-alpha.3
+# Bella — 0.1.0-alpha.3
 
-A Linux terminal messenger for people and their personal AI agents. Use local mode on one computer or connect multiple computers through the optional authenticated hub. Profiles, pictures, shared groups, offline queues and owner-approved tools are available for alpha testing. [Two-computer setup guide](docs/NETWORK.md).
+A Linux terminal messenger for people and their personal AI agents. Bella takes its name from the familiar greeting. The project was previously called Term Social. Use local mode on one computer or connect multiple computers through the optional authenticated hub. Profiles, pictures, shared groups, offline queues and owner-approved tools are available for alpha testing. [Two-computer setup guide](docs/NETWORK.md).
 
 ## Start
 
@@ -24,7 +24,7 @@ Requirements: Linux x86_64, Python 3.11+, a UTF-8 terminal (80×24 or larger rec
 ./start --help                   # Launcher and app options
 ```
 
-Launcher-started models stay available after chat exits so another session can reuse them. Stop them explicitly when finished. Existing servers started elsewhere are reused but never stopped by the launcher. The default installed-model path is `~/models/Qwen3.6-35B-A3B-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`; override it with `--model-path FILE` or `TERM_SOCIAL_MODEL_PATH`. See [model setup](docs/USER_GUIDE.md#model-startup).
+Launcher-started models stay available after chat exits so another session can reuse them. Stop them explicitly when finished. Existing servers started elsewhere are reused but never stopped by the launcher. The default installed-model path is `~/models/Qwen3.6-35B-A3B-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`; override it with `--model-path FILE` or `BELLA_MODEL_PATH` (`TERM_SOCIAL_MODEL_PATH` still works). See [model setup](docs/USER_GUIDE.md#model-startup).
 
 ## Try the alpha
 
@@ -67,7 +67,7 @@ Each bot uses the configured endpoint and workspace. An empty model field inheri
 
 ## Data and backups
 
-The extracted package uses `${XDG_DATA_HOME:-~/.local/share}/term-social/chat.sqlite` and a `settings.json` beside it. Source-tree launchers use `.data/chat.sqlite`. Override with `--data PATH` / `TERM_SOCIAL_DATA` and `--config PATH` / `TERM_SOCIAL_CONFIG`. The default new-profile agent workspace is a separate `workspace/` directory beside the database. Existing source data is not silently moved into the installed-data location.
+The extracted package uses `${XDG_DATA_HOME:-~/.local/share}/bella/chat.sqlite` and a `settings.json` beside it. Source-tree launchers use `.data/chat.sqlite`. Override with `--data PATH` / `BELLA_DATA` and `--config PATH` / `BELLA_CONFIG`. The older `TERM_SOCIAL_DATA` and `TERM_SOCIAL_CONFIG` names are still read when the matching `BELLA_*` variable is unset; this is temporary. If the installed `bella` directory does not exist and a leftover `term-social` directory is present in the same parent, the launcher moves it once (or copies it if a rename is not possible) and never deletes your data if that fails. A workspace path stored inside the moved `settings.json` is updated when it pointed inside the old directory. The default new-profile agent workspace is a separate `workspace/` directory beside the database. Existing source-tree `.data` is not silently moved into the installed-data location. `./term-social` and the packaged `bin/term-social` are temporary aliases for Bella and will be removed in a later release.
 
 ```bash
 ./start --backup /absolute/path/new-backup.sqlite
@@ -89,7 +89,7 @@ The source tree on this computer has its development toolchain under `.dev/`:
 ./scripts/check test
 ./scripts/check clippy -- -D warnings
 ./scripts/check build --release --locked
-python3 tests/alpha_smoke.py --binary target/x86_64-unknown-linux-musl/release/term-social --launcher ./start
+python3 tests/alpha_smoke.py --binary target/x86_64-unknown-linux-musl/release/bella --launcher ./start
 ./scripts/build-alpha
 ```
 

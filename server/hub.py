@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Term Social shared hub. Python standard library only; see docs/NETWORK.md."""
+"""Bella shared hub. Python standard library only; see docs/NETWORK.md."""
 import argparse, contextlib, datetime, hashlib, hmac, http.server, json, os, pathlib, re, secrets, socket, sqlite3, ssl, threading, time, urllib.parse, uuid, unicodedata
 VERSION = 1
 MAX_BODY = 256 * 1024
@@ -45,7 +45,7 @@ class Hub(http.server.ThreadingHTTPServer):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version='HTTP/1.0'
-    server_version='TermSocialHub/1'
+    server_version='BellaHub/1'
     def setup(self):
         super().setup();self.connection.settimeout(8)
     def log_message(self,*args): pass # Never log bearer tokens, invitations, passwords or message bodies.
@@ -185,7 +185,7 @@ def main():
     if bool(args.tls_cert)!=bool(args.tls_key):parser.error('Supply both --tls-cert and --tls-key')
     if args.tls_cert:
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2;context.load_cert_chain(args.tls_cert,args.tls_key);hub.socket=context.wrap_socket(hub.socket,server_side=True)
-    print(f'Term Social hub listening on {args.bind}:{hub.server_port}. Registration invite: {invite_path}',flush=True)
+    print(f'Bella hub listening on {args.bind}:{hub.server_port}. Registration invite: {invite_path}',flush=True)
     try:hub.serve_forever()
     except KeyboardInterrupt:pass
     finally:hub.server_close()

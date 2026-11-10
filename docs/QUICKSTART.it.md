@@ -1,4 +1,4 @@
-# Prima prova — Term Social 0.1.0-alpha.3
+# Prima prova — Bella 0.1.0-alpha.3
 
 Questa alpha permette di provare chat, gruppi e agente **su questo computer**, aprendo più terminali. La comunicazione tra PC diversi non è ancora disponibile.
 

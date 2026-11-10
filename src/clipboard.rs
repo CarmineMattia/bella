@@ -81,8 +81,7 @@ mod tests {
     fn native_helper_receives_exact_unicode_multiline_and_shell_characters() -> std::io::Result<()>
     {
         use std::os::unix::fs::PermissionsExt;
-        let root =
-            std::env::temp_dir().join(format!("term-social-clipboard-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("bella-clipboard-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let helper = root.join("helper");
         std::fs::write(&helper, "#!/bin/sh\ncat > \"$1\"\n")?;

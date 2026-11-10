@@ -3,6 +3,7 @@ mod browser;
 mod clipboard;
 mod editor;
 mod network;
+mod paths;
 mod profile_ui;
 mod profiles;
 mod recipient;
@@ -12,7 +13,7 @@ mod tasks;
 mod ui;
 
 use anyhow::{Result, bail};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -49,16 +50,18 @@ struct Args {
     name: Option<String>,
     #[arg(long, default_value = "lobby")]
     room: String,
-    #[arg(long, env = "TERM_SOCIAL_DATA", default_value = ".data/chat.sqlite")]
+    /// SQLite database path [env: BELLA_DATA or TERM_SOCIAL_DATA]
+    #[arg(long, default_value = ".data/chat.sqlite")]
     data: PathBuf,
     #[arg(long)]
     endpoint: Option<String>,
     #[arg(long)]
     model: Option<String>,
-    #[arg(long, env = "TERM_SOCIAL_WORKSPACE")]
+    /// Agent workspace [env: BELLA_WORKSPACE or TERM_SOCIAL_WORKSPACE]
+    #[arg(long)]
     workspace: Option<PathBuf>,
-    /// Saved profile settings; CLI options override this file.
-    #[arg(long, env = "TERM_SOCIAL_CONFIG")]
+    /// Saved profile settings; CLI options override this file [env: BELLA_CONFIG or TERM_SOCIAL_CONFIG]
+    #[arg(long)]
     config: Option<PathBuf>,
     /// Edit the saved profile before opening chat.
     #[arg(long)]
@@ -179,7 +182,18 @@ fn valid_room(room: &str) -> bool {
         && !room.chars().any(char::is_control)
 }
 fn main() -> Result<()> {
-    let mut args = Args::parse();
+    let matches = Args::command().get_matches();
+    let mut args = Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    paths::apply_data_env(
+        matches.value_source("data") == Some(clap::parser::ValueSource::DefaultValue),
+        &mut args.data,
+    );
+    paths::apply_optional_env(
+        &mut args.workspace,
+        "BELLA_WORKSPACE",
+        "TERM_SOCIAL_WORKSPACE",
+    );
+    paths::apply_optional_env(&mut args.config, "BELLA_CONFIG", "TERM_SOCIAL_CONFIG");
     args.room = args.room.trim().to_owned();
     if args.network_logout {
         network::logout(&args.data.with_extension("network.json"))?;
@@ -327,6 +341,7 @@ fn main() -> Result<()> {
         use std::os::unix::process::CommandExt;
         let mut command = std::process::Command::new(std::env::current_exe()?);
         command
+            .env_remove("BELLA_WORKSPACE")
             .env_remove("TERM_SOCIAL_WORKSPACE")
             .arg("--setup")
             .arg("--data")
