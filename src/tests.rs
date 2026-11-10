@@ -201,32 +201,32 @@ fn ui_preview() -> Result<()> {
         a.update_hits(false)?;
     }
 
-    if let Ok(mode) = std::env::var("TERM_SOCIAL_PREVIEW_MODE") {
-        if mode == "profile" || mode == "bots" || mode == "portraits" {
-            let mut human = profiles::Profile::user("carmine");
-            human.name = "Carmine".into();
-            human.about = "Building a home for people and their agents.".into();
-            let mut bot = profiles::Profile::bot("carmine", "bot");
-            bot.name = "Orbit".into();
-            bot.about = "Your personal assistant".into();
-            if let Ok(path) = std::env::var("TERM_SOCIAL_AVATAR") {
-                human.avatar = profiles::import_avatar(&path)?;
-                bot.avatar = human.avatar.clone();
-            }
-            profiles::save(a.store.connection(), &human)?;
-            profiles::save(a.store.connection(), &bot)?;
-            let mut extra = profiles::Profile::bot("carmine", "builder");
-            extra.name = "Builder".into();
-            extra.about = "Code, plans and careful changes".into();
-            extra.instructions = "Help build and test software. Explain changes clearly.".into();
-            profiles::save(a.store.connection(), &extra)?;
-            a.refresh()?;
-            if mode == "profile" {
-                a.open_dialog(Dialog::Profile);
-            }
-            if mode == "bots" {
-                a.open_dialog(Dialog::Bots);
-            }
+    if let Ok(mode) = std::env::var("TERM_SOCIAL_PREVIEW_MODE")
+        && (mode == "profile" || mode == "bots" || mode == "portraits")
+    {
+        let mut human = profiles::Profile::user("carmine");
+        human.name = "Carmine".into();
+        human.about = "Building a home for people and their agents.".into();
+        let mut bot = profiles::Profile::bot("carmine", "bot");
+        bot.name = "Orbit".into();
+        bot.about = "Your personal assistant".into();
+        if let Ok(path) = std::env::var("TERM_SOCIAL_AVATAR") {
+            human.avatar = profiles::import_avatar(&path)?;
+            bot.avatar = human.avatar.clone();
+        }
+        profiles::save(a.store.connection(), &human)?;
+        profiles::save(a.store.connection(), &bot)?;
+        let mut extra = profiles::Profile::bot("carmine", "builder");
+        extra.name = "Builder".into();
+        extra.about = "Code, plans and careful changes".into();
+        extra.instructions = "Help build and test software. Explain changes clearly.".into();
+        profiles::save(a.store.connection(), &extra)?;
+        a.refresh()?;
+        if mode == "profile" {
+            a.open_dialog(Dialog::Profile);
+        }
+        if mode == "bots" {
+            a.open_dialog(Dialog::Bots);
         }
     }
     if std::env::var("TERM_SOCIAL_PREVIEW_MODE").as_deref() == Ok("recipient") {
@@ -841,10 +841,10 @@ fn named_bot_request_uses_its_model_personality_and_separate_assistant_role() ->
             if line == "\r\n" {
                 break;
             }
-            if let Some((k, v)) = line.split_once(':') {
-                if k.eq_ignore_ascii_case("content-length") {
-                    length = v.trim().parse::<usize>()?;
-                }
+            if let Some((k, v)) = line.split_once(':')
+                && k.eq_ignore_ascii_case("content-length")
+            {
+                length = v.trim().parse::<usize>()?;
             }
         }
         let mut body = vec![0; length];
@@ -1178,10 +1178,10 @@ fn mock_model(
                 if line == "\r\n" {
                     break;
                 }
-                if let Some((k, v)) = line.split_once(':') {
-                    if k.eq_ignore_ascii_case("content-length") {
-                        length = v.trim().parse::<usize>()?;
-                    }
+                if let Some((k, v)) = line.split_once(':')
+                    && k.eq_ignore_ascii_case("content-length")
+                {
+                    length = v.trim().parse::<usize>()?;
                 }
             }
             let mut body = vec![0; length];

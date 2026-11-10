@@ -639,6 +639,43 @@ fn locked_cycle(
     cycle(store, client, c, stop)
 }
 
+pub fn logout(path: &Path) -> Result<()> {
+    if let Some(c) = Credentials::load(path)? {
+        response(
+            client()?
+                .post(format!("{}/logout", c.url))
+                .bearer_auth(&c.token)
+                .json(&json!({}))
+                .send()?,
+        )?;
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn entity_key(payload: &Value) -> Option<String> {
+    match payload["type"].as_str()? {
+        "profile" => Some(
+            json!([
+                "profile",
+                payload["profile"]["owner"],
+                payload["profile"]["handle"]
+            ])
+            .to_string(),
+        ),
+        "bot_membership" => Some(
+            json!([
+                "bot_membership",
+                payload["owner"],
+                payload["room"],
+                payload["handle"]
+            ])
+            .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 pub fn test_connection() -> Connection {
     let (_, rx) = mpsc::channel();
@@ -825,42 +862,5 @@ mod tests {
         ] {
             assert!(validate_url(bad).is_err(), "{bad}");
         }
-    }
-}
-
-pub fn logout(path: &Path) -> Result<()> {
-    if let Some(c) = Credentials::load(path)? {
-        response(
-            client()?
-                .post(format!("{}/logout", c.url))
-                .bearer_auth(&c.token)
-                .json(&json!({}))
-                .send()?,
-        )?;
-        std::fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
-fn entity_key(payload: &Value) -> Option<String> {
-    match payload["type"].as_str()? {
-        "profile" => Some(
-            json!([
-                "profile",
-                payload["profile"]["owner"],
-                payload["profile"]["handle"]
-            ])
-            .to_string(),
-        ),
-        "bot_membership" => Some(
-            json!([
-                "bot_membership",
-                payload["owner"],
-                payload["room"],
-                payload["handle"]
-            ])
-            .to_string(),
-        ),
-        _ => None,
     }
 }
