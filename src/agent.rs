@@ -1,5 +1,12 @@
 use crate::store::Message;
 use anyhow::{Context, Result, bail};
+use bella::{
+    tool_action::Action as ToolAction,
+    tool_result::{
+        CapturedStream, Diagnostic, DiagnosticKind, Execution, Observation, Outcome, Scope,
+        ToolResult, Verification,
+    },
+};
 use serde_json::{Value, json};
 use std::{
     io::Read,
@@ -48,6 +55,8 @@ pub struct Config {
     /// When set, this request is answering a guest. Tools, if enabled, are shell-only
     /// and run in the guest folder after the owner approves.
     pub guest: Option<GuestContext>,
+    pub request_id: String,
+    pub requester: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestContext {
@@ -106,7 +115,22 @@ impl std::ops::Deref for Task {
         &self.events
     }
 }
-pub fn start(config: Config, history: Vec<Message>) -> Task {
+pub fn start(mut config: Config, history: Vec<Message>) -> Task {
+    if config.request_id.is_empty() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        config.request_id = format!(
+            "standalone-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+    }
+    if config.requester.is_empty() {
+        config.requester = "local-owner".into();
+    }
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = cancelled.clone();
@@ -186,6 +210,7 @@ async fn run(
         );
     }
     let mut owner_denied = false;
+    let mut action_sequence = 0u64;
     for _ in 0..6 {
         tx.send(Event::Turn)?;
         tx.send(Event::Phase(Phase::Thinking))?;
@@ -252,22 +277,55 @@ async fn run(
                 .and_then(Value::as_str)
                 .context("Tool call has no ID")?;
             let tool_name = call.pointer("/function/name").and_then(Value::as_str);
+            action_sequence += 1;
+            let workdir = config
+                .guest
+                .as_ref()
+                .map(|g| g.home.as_path())
+                .unwrap_or(&config.workspace);
+            let scope = Scope {
+                request_id: config.request_id.clone(),
+                action_id: format!("{}:{action_sequence}", config.request_id),
+                requester: config.requester.clone(),
+                tool: tool_name.unwrap_or("unknown").into(),
+                workspace: if config.tools {
+                    workdir.to_string_lossy().into_owned()
+                } else {
+                    "Unavailable: tools disabled".into()
+                },
+            };
             let output = if !config.tools {
                 // Delegated request with guest tools off: refuse before parsing; no approval, no execution.
-                TOOLS_DISABLED.to_owned()
+                blocked_action(scope, TOOLS_DISABLED)?.record()?
             } else if owner_denied {
                 // Enforce denial before parsing arguments or preparing any local action.
-                OWNER_DENIED.to_owned()
+                blocked_action(scope, OWNER_DENIED)?.record()?
             } else if config.guest.is_some() && tool_name == Some("open_browser") {
-                GUEST_BROWSER_DISABLED.to_owned()
+                blocked_action(scope, GUEST_BROWSER_DISABLED)?.record()?
             } else if !matches!(tool_name, Some("shell" | "open_browser")) {
-                "Unsupported tool".to_owned()
+                blocked_action(scope, "Unsupported tool")?.record()?
             } else {
-                let arguments: Value = serde_json::from_str(
+                let arguments: Value = match serde_json::from_str(
                     call.pointer("/function/arguments")
                         .and_then(Value::as_str)
                         .unwrap_or("{}"),
-                )?;
+                ) {
+                    Ok(arguments) => arguments,
+                    Err(_) => {
+                        let output = unstarted_action(
+                            scope,
+                            "Not executed".into(),
+                            None,
+                            Outcome::Failed,
+                            DiagnosticKind::InvalidArguments,
+                            "Malformed tool arguments".into(),
+                        )?
+                        .record()?;
+                        tx.send(Event::Note(output.clone()))?;
+                        messages.push(json!({"role":"tool","tool_call_id":id,"content":output}));
+                        continue;
+                    }
+                };
                 let browser_action = tool_name == Some("open_browser");
                 let target = arguments
                     .get("url")
@@ -275,6 +333,11 @@ async fn run(
                     .filter(|url| url.trim() != "about:blank")
                     .unwrap_or("Default browser startup page")
                     .to_owned();
+                let target = if target.len() <= 4096 {
+                    target
+                } else {
+                    "Invalid browser target (over 4 KiB)".into()
+                };
                 let command = if browser_action {
                     let proposed = if arguments.get("url").is_some_and(|v| !v.is_string()) {
                         Err(anyhow::anyhow!("Browser URL must be a string"))
@@ -287,13 +350,15 @@ async fn run(
                     match proposed {
                         Ok(command) => command,
                         Err(error) => {
-                            let output = crate::browser::Action::result(
-                                "Browser request".into(),
+                            let output = unstarted_action(
+                                scope,
                                 "Not executed".into(),
-                                false,
+                                Some(target),
+                                Outcome::Failed,
+                                DiagnosticKind::InvalidArguments,
                                 format!("Cannot prepare browser launch: {error:#}"),
-                            )
-                            .record();
+                            )?
+                            .record()?;
                             tx.send(Event::Note(output.clone()))?;
                             messages
                                 .push(json!({"role":"tool","tool_call_id":id,"content":output}));
@@ -304,10 +369,23 @@ async fn run(
                     arguments
                         .get("command")
                         .and_then(Value::as_str)
-                        .context("Missing shell command")?
+                        .unwrap_or("")
                         .to_owned()
                 };
-                validate_command(&command)?;
+                if let Err(error) = validate_command(&command) {
+                    let output = unstarted_action(
+                        scope,
+                        "Not executed".into(),
+                        None,
+                        Outcome::Failed,
+                        DiagnosticKind::InvalidArguments,
+                        error.to_string(),
+                    )?
+                    .record()?;
+                    tx.send(Event::Note(output.clone()))?;
+                    messages.push(json!({"role":"tool","tool_call_id":id,"content":output}));
+                    continue;
+                }
                 let (answer, approval) = mpsc::channel();
                 tx.send(Event::Phase(Phase::AwaitingApproval))?;
                 tx.send(Event::Approval {
@@ -334,27 +412,45 @@ async fn run(
                     let cancelled = cancelled.clone();
                     tokio::task::spawn_blocking(move || -> Result<String> {
                         if cancelled.load(Ordering::SeqCst) {
-                            bail!("Stopped before shell execution");
+                            let output = unstarted_action(
+                                scope,
+                                command,
+                                browser_action.then_some(target),
+                                Outcome::Cancelled,
+                                DiagnosticKind::Other,
+                                "Stopped before tool execution".into(),
+                            )?
+                            .record()?;
+                            tx.send(Event::Note(output.clone()))?;
+                            return Ok(output);
                         }
-                        let output = if browser_action {
-                            execute_browser(target, command, &workspace).record()
-                        } else {
-                            let workdir = guest
-                                .as_ref()
-                                .map(|g| g.home.as_path())
-                                .unwrap_or(workspace.as_path());
-                            format!(
-                                "Approved shell: {command}\n{}",
-                                execute_report(
-                                    &command,
-                                    &ExecPolicy {
-                                        workspace: workdir,
-                                        guest: guest.as_ref(),
-                                        cancelled: Some(cancelled),
-                                    },
-                                )?
-                                .output
-                            )
+                        let workdir = guest
+                            .as_ref()
+                            .map(|g| g.home.as_path())
+                            .unwrap_or(&workspace);
+                        let output = match execute_report(
+                            &command,
+                            &ExecPolicy {
+                                workspace: workdir,
+                                guest: guest.as_ref(),
+                                cancelled: Some(cancelled),
+                            },
+                        ) {
+                            Ok(report) => ToolAction {
+                                command,
+                                target: browser_action.then_some(target),
+                                result: ToolResult::new(scope, report.observation)?,
+                            }
+                            .record()?,
+                            Err(error) => unstarted_action(
+                                scope,
+                                command,
+                                browser_action.then_some(target),
+                                Outcome::Failed,
+                                DiagnosticKind::Unavailable,
+                                format!("Could not start tool: {error:#}"),
+                            )?
+                            .record()?,
                         };
                         tx.send(Event::Note(output.clone()))?;
                         Ok(output)
@@ -363,17 +459,15 @@ async fn run(
                     .context("Shell worker stopped unexpectedly")??
                 } else {
                     owner_denied = true;
-                    let output = if browser_action {
-                        crate::browser::Action {
-                            state: crate::browser::State::Denied,
-                            target,
-                            command,
-                            diagnostics: OWNER_DENIED.into(),
-                        }
-                        .record()
-                    } else {
-                        format!("Shell request denied: {command}. {OWNER_DENIED}")
-                    };
+                    let output = unstarted_action(
+                        scope,
+                        command,
+                        browser_action.then_some(target),
+                        Outcome::Denied,
+                        DiagnosticKind::Policy,
+                        OWNER_DENIED.into(),
+                    )?
+                    .record()?;
                     tx.send(Event::Note(output.clone()))?;
                     output
                 }
@@ -384,7 +478,46 @@ async fn run(
     bail!("Agent stopped after six model turns. Send a new message to continue.")
 }
 
+fn unstarted_action(
+    scope: Scope,
+    command: String,
+    target: Option<String>,
+    outcome: Outcome,
+    kind: DiagnosticKind,
+    message: String,
+) -> Result<ToolAction> {
+    Ok(ToolAction {
+        command,
+        target,
+        result: ToolResult::new(
+            scope,
+            Observation {
+                outcome,
+                execution: Execution::NotStarted,
+                exit_code: None,
+                verification: Verification::NotApplicable,
+                stdout: CapturedStream::default(),
+                stderr: CapturedStream::default(),
+                diagnostic: Some(Diagnostic { kind, message }),
+            },
+        )?,
+    })
+}
+fn blocked_action(scope: Scope, reason: &str) -> Result<ToolAction> {
+    unstarted_action(
+        scope,
+        "Not executed".into(),
+        None,
+        Outcome::Blocked,
+        DiagnosticKind::Policy,
+        reason.into(),
+    )
+}
+
 fn validate_command(command: &str) -> Result<()> {
+    if command.len() > 8192 {
+        bail!("Shell command exceeds the 8 KiB review limit");
+    }
     if command.trim().is_empty() {
         bail!("The model proposed an empty shell command");
     }
@@ -504,6 +637,7 @@ fn read_stream(reader: impl std::io::BufRead, tx: &mpsc::Sender<Event>) -> Resul
     reply.finish()
 }
 
+#[cfg(test)]
 fn execute_browser(
     target: String,
     command: String,
@@ -524,8 +658,11 @@ fn execute_browser(
 }
 
 struct CommandReport {
+    #[cfg(test)]
     success: bool,
+    #[cfg(test)]
     output: String,
+    observation: Observation,
 }
 
 /// Virtual address-space cap for a guest command (not a hard RSS guarantee).
@@ -555,30 +692,41 @@ fn kill_group(pid: u32, signal: i32) {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum StopReason {
+    Finished,
+    TimedOut,
+    Cancelled,
+}
 fn wait_child(
     child: &mut Child,
     cancelled: Option<&AtomicBool>,
     kill_on_cancel: bool,
-) -> Result<std::process::ExitStatus> {
-    if !kill_on_cancel || cancelled.is_none() {
-        return Ok(child.wait()?);
-    }
-    let cancelled = cancelled.unwrap();
+    timeout: Option<Duration>,
+) -> Result<(std::process::ExitStatus, StopReason)> {
+    let began = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok(status);
+            return Ok((status, StopReason::Finished));
         }
-        if cancelled.load(Ordering::SeqCst) {
+        let reason = if kill_on_cancel && cancelled.is_some_and(|f| f.load(Ordering::SeqCst)) {
+            Some(StopReason::Cancelled)
+        } else if timeout.is_some_and(|limit| began.elapsed() >= limit) {
+            Some(StopReason::TimedOut)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
             let pid = child.id();
             kill_group(pid, libc::SIGTERM);
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 if let Some(status) = child.try_wait()? {
-                    return Ok(status);
+                    return Ok((status, reason));
                 }
                 if Instant::now() >= deadline {
                     kill_group(pid, libc::SIGKILL);
-                    return Ok(child.wait()?);
+                    return Ok((child.wait()?, reason));
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -608,26 +756,22 @@ fn execute_report(command: &str, policy: &ExecPolicy<'_>) -> Result<CommandRepor
     // Detach from the UI's controlling terminal. sudo must never compete with
     // the chat editor for password input; cached/NOPASSWD authorization still works.
     let script = format!("sudo() {{ command sudo -n \"$@\"; }}\n{command}");
-    let mut cmd = if policy.guest.is_some() {
-        // Guest commands have no time limit. Become a session leader in pre_exec
-        // so Stop can signal the whole process group.
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", &script]);
-        cmd
-    } else {
-        let mut cmd = Command::new("setsid");
-        cmd.args([
-            "--wait",
-            "timeout",
-            "--signal=TERM",
-            "--kill-after=2s",
-            "20s",
-            "sh",
-            "-c",
-            &script,
-        ]);
-        cmd
-    };
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", &script]);
+    // Each tool gets its own process group; parent timers distinguish real timeouts
+    // from a command that happens to return 124 or 137.
+    let guest_limits = policy.guest.is_some();
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if guest_limits {
+                apply_guest_limits();
+            }
+            Ok(())
+        });
+    }
     cmd.current_dir(policy.workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -636,15 +780,6 @@ fn execute_report(command: &str, policy: &ExecPolicy<'_>) -> Result<CommandRepor
         cmd.env_clear();
         for (key, value) in crate::paths::guest_command_env(&guest.home) {
             cmd.env(key, value);
-        }
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                apply_guest_limits();
-                Ok(())
-            });
         }
     } else {
         cmd.env_remove("SUDO_ASKPASS");
@@ -669,7 +804,7 @@ fn execute_report(command: &str, policy: &ExecPolicy<'_>) -> Result<CommandRepor
                     break;
                 }
                 let mut bytes = kept.lock().unwrap();
-                let remaining = 16384usize.saturating_sub(bytes.len());
+                let remaining = (bella::tool_result::STREAM_LIMIT + 3).saturating_sub(bytes.len());
                 if n > remaining {
                     cap_hit.store(true, Ordering::Relaxed);
                 }
@@ -683,18 +818,56 @@ fn execute_report(command: &str, policy: &ExecPolicy<'_>) -> Result<CommandRepor
         drain(child.stdout.take().context("Missing stdout")?);
     let (stderr_done, stderr, stderr_capped) =
         drain(child.stderr.take().context("Missing stderr")?);
-    let status = wait_child(
+    let (status, stop_reason) = match wait_child(
         &mut child,
         policy.cancelled.as_deref(),
         policy.guest.is_some(),
-    )?;
+        policy.guest.is_none().then_some(Duration::from_secs(20)),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            kill_group(child.id(), libc::SIGKILL);
+            let _ = child.wait();
+            let message = format!(
+                "Could not observe process completion: {error}. External effects may have occurred."
+            );
+            return Ok(CommandReport {
+                observation: Observation {
+                    outcome: Outcome::Failed,
+                    execution: Execution::Started,
+                    exit_code: None,
+                    verification: Verification::Unverified,
+                    stdout: CapturedStream::capture(
+                        &stdout.lock().unwrap(),
+                        stdout_capped.load(Ordering::Relaxed),
+                    ),
+                    stderr: CapturedStream::capture(
+                        &stderr.lock().unwrap(),
+                        stderr_capped.load(Ordering::Relaxed),
+                    ),
+                    diagnostic: Some(Diagnostic {
+                        kind: DiagnosticKind::ExecutionError,
+                        message: message.clone(),
+                    }),
+                },
+                #[cfg(test)]
+                success: false,
+                #[cfg(test)]
+                output: message,
+            });
+        }
+    };
     // A shell may leave background children holding its output pipes. Do not let those
     // children keep the agent task alive beyond the approved command's own exit.
     let stdout_closed = stdout_done.recv_timeout(Duration::from_millis(150)).is_ok();
     let stderr_closed = stderr_done.recv_timeout(Duration::from_millis(150)).is_ok();
-    let stderr_text = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
+    let stdout_bytes = stdout.lock().unwrap().clone();
+    let stderr_bytes = stderr.lock().unwrap().clone();
+    let stderr_text = String::from_utf8_lossy(&stderr_bytes).into_owned();
     let lower = stderr_text.to_lowercase();
-    let notice = if matches!(status.code(), Some(124 | 137)) {
+    let notice = if stop_reason == StopReason::Cancelled {
+        "Command cancelled by the owner. External effects may have occurred; inspect state before retrying."
+    } else if stop_reason == StopReason::TimedOut {
         "Command timed out. Completion was not confirmed; inspect current state before retrying."
     } else if !status.success()
         && lower.contains("sudo")
@@ -716,10 +889,49 @@ fn execute_report(command: &str, policy: &ExecPolicy<'_>) -> Result<CommandRepor
         ""
     };
     Ok(CommandReport {
+        observation: Observation {
+            outcome: match stop_reason {
+                StopReason::TimedOut => Outcome::TimedOut,
+                StopReason::Cancelled => Outcome::Cancelled,
+                StopReason::Finished => {
+                    if status.success() {
+                        Outcome::Succeeded
+                    } else {
+                        Outcome::Failed
+                    }
+                }
+            },
+            execution: Execution::Started,
+            exit_code: status.code(),
+            verification: Verification::Unverified,
+            stdout: CapturedStream::capture(&stdout_bytes, stdout_capped.load(Ordering::Relaxed)),
+            stderr: CapturedStream::capture(&stderr_bytes, stderr_capped.load(Ordering::Relaxed)),
+            diagnostic: if notice.is_empty() && stdout_closed && stderr_closed {
+                None
+            } else {
+                Some(Diagnostic {
+                    kind: if notice.starts_with("Administrator") {
+                        DiagnosticKind::AuthenticationRequired
+                    } else {
+                        DiagnosticKind::ExecutionError
+                    },
+                    message: format!(
+                        "{notice}{}",
+                        if stdout_closed && stderr_closed {
+                            ""
+                        } else {
+                            "\nOutput pipes are still open; background processes may continue running."
+                        }
+                    ),
+                })
+            },
+        },
+        #[cfg(test)]
         success: status.success(),
+        #[cfg(test)]
         output: format!(
             "Exit: {status}\n{notice}\n{}\n{stderr_text}{}{}",
-            String::from_utf8_lossy(&stdout.lock().unwrap()),
+            String::from_utf8_lossy(&stdout_bytes),
             if stdout_capped.load(Ordering::Relaxed) || stderr_capped.load(Ordering::Relaxed) {
                 "\n[output truncated at 16 KiB per stream]"
             } else {
@@ -742,6 +954,102 @@ mod tests {
         net::TcpListener,
     };
 
+    fn blocked_reason(content: &Value, expected: &str) -> bool {
+        content
+            .as_str()
+            .and_then(ToolAction::decode)
+            .is_some_and(|action| {
+                action.result.observation().outcome == Outcome::Blocked
+                    && action.result.observation().execution == Execution::NotStarted
+                    && action
+                        .result
+                        .observation()
+                        .diagnostic
+                        .as_ref()
+                        .is_some_and(|d| d.message == expected)
+            })
+    }
+    #[test]
+    fn spawn_failure_is_saved_as_unstarted_with_the_original_scope() -> Result<()> {
+        let (endpoint, server) = one_response(tool_reply("printf should-not-run"))?;
+        let mut cfg = config(endpoint);
+        cfg.workspace =
+            std::env::temp_dir().join(format!("bella-no-workspace-{}", std::process::id()));
+        assert!(!cfg.workspace.exists());
+        let task = start(cfg, Vec::new());
+        let result = loop {
+            match task.recv_timeout(Duration::from_secs(3))? {
+                Event::Approval { answer, .. } => answer.send(true)?,
+                Event::Note(note) => {
+                    break ToolAction::decode(&note).context("Missing structured spawn result")?;
+                }
+                Event::Finished(result) => bail!("Finished without spawn report: {result:?}"),
+                _ => {}
+            }
+        };
+        assert_eq!(result.result.observation().outcome, Outcome::Failed);
+        assert_eq!(result.result.observation().execution, Execution::NotStarted);
+        assert_eq!(
+            result
+                .result
+                .observation()
+                .diagnostic
+                .as_ref()
+                .unwrap()
+                .kind,
+            DiagnosticKind::Unavailable
+        );
+        assert_eq!(result.result.scope().request_id, "test-request");
+        task.control.cancel();
+        server.join().unwrap();
+        Ok(())
+    }
+    #[test]
+    fn executor_status_is_not_inferred_from_shell_output_or_exit_124() -> Result<()> {
+        for command in ["printf 'Command timed out'", "exit 124"] {
+            let report = execute_report(
+                command,
+                &ExecPolicy {
+                    workspace: &std::env::temp_dir(),
+                    guest: None,
+                    cancelled: None,
+                },
+            )?;
+            assert_eq!(
+                report.observation.outcome,
+                if command == "exit 124" {
+                    Outcome::Failed
+                } else {
+                    Outcome::Succeeded
+                }
+            );
+            assert_eq!(report.observation.execution, Execution::Started);
+            assert_eq!(report.observation.verification, Verification::Unverified);
+        }
+        Ok(())
+    }
+    #[test]
+    fn parent_timer_reports_actual_timeout_and_stops_the_process_group() -> Result<()> {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10"]);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let mut child = command.spawn()?;
+        let began = Instant::now();
+        let (status, reason) =
+            wait_child(&mut child, None, false, Some(Duration::from_millis(40)))?;
+        assert!(reason == StopReason::TimedOut);
+        assert!(!status.success());
+        assert!(began.elapsed() < Duration::from_secs(3));
+        Ok(())
+    }
     #[test]
     fn browser_execution_distinguishes_acceptance_failure_and_spawn_error() {
         let workspace = std::env::temp_dir();
@@ -848,6 +1156,18 @@ mod tests {
             }
         }
         assert_eq!(approvals, 2);
+        let first = ToolAction::decode(&notes[0]).unwrap();
+        let second = ToolAction::decode(&notes[1]).unwrap();
+        assert_eq!(first.result.observation().outcome, Outcome::Failed);
+        assert_eq!(second.result.observation().outcome, Outcome::Succeeded);
+        assert_eq!(
+            first.result.scope().request_id,
+            second.result.scope().request_id
+        );
+        assert_ne!(
+            first.result.scope().action_id,
+            second.result.scope().action_id
+        );
         assert!(notes[0].contains("Administrator authorization required"));
         assert!(notes[1].contains("read-only diagnostic completed"));
         let bodies = server.join().expect("mock model server")?;
@@ -957,6 +1277,8 @@ mod tests {
             instructions: String::new(),
             tools: true,
             guest: None,
+            request_id: "test-request".into(),
+            requester: "owner".into(),
         }
     }
     fn tool_reply(command: &str) -> Value {
@@ -1174,6 +1496,8 @@ mod tests {
                 instructions: String::new(),
                 tools: true,
                 guest: None,
+                request_id: "test-request".into(),
+                requester: "owner".into(),
             },
             Vec::new(),
         );
@@ -1316,7 +1640,7 @@ mod tests {
         assert!(
             results[first_blocked..]
                 .iter()
-                .all(|result| result["content"] == OWNER_DENIED)
+                .all(|result| blocked_reason(&result["content"], OWNER_DENIED))
         );
         if approve_first {
             std::fs::remove_file(approved_path)?;
@@ -1411,7 +1735,11 @@ mod tests {
             .filter(|m| m["role"] == "tool")
             .collect();
         assert_eq!(tools.len(), 2);
-        assert!(tools.iter().all(|m| m["content"] == TOOLS_DISABLED));
+        assert!(
+            tools
+                .iter()
+                .all(|m| blocked_reason(&m["content"], TOOLS_DISABLED))
+        );
         Ok(())
     }
     #[test]
@@ -1431,6 +1759,8 @@ mod tests {
             author: "alice's @planner".into(),
             instructions: String::new(),
             tools: true,
+            request_id: "test-guest-request".into(),
+            requester: requester.into(),
             guest: Some(GuestContext {
                 requester: requester.into(),
                 home,
@@ -1497,7 +1827,7 @@ mod tests {
             .rev()
             .find(|m| m["role"] == "tool")
             .unwrap();
-        assert_eq!(reply["content"], GUEST_BROWSER_DISABLED);
+        assert!(blocked_reason(&reply["content"], GUEST_BROWSER_DISABLED));
         let _ = std::fs::remove_dir_all(home);
         Ok(())
     }

@@ -136,8 +136,10 @@ class Model:
                 self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(payload))); self.end_headers(); self.wfile.write(payload)
             def do_POST(self):
                 parent.bodies.append(json.loads(self.rfile.read(int(self.headers['Content-Length'])))); parent.requests += 1
-                if parent.mode == 'tool':
+                if parent.mode == 'tool' or parent.mode in ('tool_once', 'browser_once') and parent.requests == 1:
                     message = {'role':'assistant','content':None,'tool_calls':[{'id':'one','type':'function','function':{'name':'shell','arguments':json.dumps({'command':parent.command})}}]}
+                    if parent.mode == 'browser_once':
+                        message['tool_calls'][0]['function'] = {'name':'open_browser','arguments':'{}'}
                     payload = json.dumps({'choices':[{'message':message}]}).encode()
                     self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(payload))); self.end_headers(); self.wfile.write(payload); return
                 self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.send_header('Connection','close'); self.end_headers(); self.close_connection = True
@@ -183,6 +185,56 @@ class Alpha(unittest.TestCase):
     def model(self,*args):
         model = Model(*args); self.models.append(model); return model
 
+    def test_structured_shell_failure_is_shared_by_model_history_and_terminal(self):
+        model = self.model('tool_once', "printf 'diagnostic stderr' >&2; exit 3")
+        terminal = self.app(model=model)
+        terminal.send('@bot check the fixture status\r')
+        eventually(lambda:self.sql("SELECT 1 FROM agent_tasks WHERE state='awaiting_approval'"))
+        self.assertFalse(self.sql("SELECT 1 FROM messages WHERE body LIKE 'Tool action v1: %'"))
+        terminal.send('y')
+        eventually(lambda:self.sql("SELECT 1 FROM agent_tasks WHERE state='completed'"))
+        terminal.wait_text('Shell · Failed')
+        terminal.wait_text('diagnostic stderr')
+        body = self.sql("SELECT body FROM messages WHERE body LIKE 'Tool action v1: %'")[0][0]
+        action = json.loads(body.removeprefix('Tool action v1: '))
+        self.assertEqual(action['result']['observation']['outcome'],'failed')
+        self.assertEqual(action['result']['observation']['exit_code'],3)
+        self.assertEqual(action['result']['scope']['requester'],'alice')
+        tool = next(m for m in reversed(model.bodies[-1]['messages']) if m['role']=='tool')
+        self.assertEqual(tool['content'],body)
+        self.assertNotIn('Tool action v1:',terminal.screen())
+        terminal.close()
+        reopened = self.app(model=model)
+        reopened.wait_text('Shell · Failed')
+        reopened.send('/tasks\r'); reopened.wait_text('Agent activity'); reopened.send('\r')
+        reopened.wait_text('Task #1'); reopened.send('\x1b[6~'); reopened.wait_text('Shell · Failed')
+        reopened.send('\x1b'); reopened.close()
+
+    def test_structured_browser_launch_uses_fixture_and_keeps_visibility_unverified(self):
+        helpers = self.root/'browser-helpers'; helpers.mkdir()
+        launcher = self.root/'launcher-called'
+        for name, script in {
+            'xdg-settings': "#!/bin/sh\nprintf 'org.bella.fixture.desktop\\n'\n",
+            'gtk-launch': '#!/bin/sh\nprintf accepted > "$BELLA_TEST_LAUNCHER"\nprintf "fixture launcher warning" >&2\n',
+        }.items():
+            path=helpers/name; path.write_text(script); path.chmod(0o700)
+        model=self.model('browser_once')
+        terminal=self.app(model=model,env={'PATH':str(helpers)+os.pathsep+os.environ.get('PATH',''),
+            'DISPLAY':':fixture','WAYLAND_DISPLAY':'','BELLA_TEST_LAUNCHER':str(launcher)})
+        terminal.send('@bot open the browser\r')
+        eventually(lambda:self.sql("SELECT 1 FROM agent_tasks WHERE state='awaiting_approval'"))
+        self.assertFalse(launcher.exists()); terminal.send('y')
+        eventually(lambda:self.sql("SELECT 1 FROM agent_tasks WHERE state='completed'"))
+        self.assertTrue(launcher.exists()); terminal.wait_text('Browser · Launch requested')
+        body=self.sql("SELECT body FROM messages WHERE body LIKE 'Tool action v1: %'")[0][0]
+        action=json.loads(body.removeprefix('Tool action v1: '))
+        self.assertEqual(action['result']['scope']['tool'],'open_browser')
+        self.assertEqual(action['result']['observation']['verification']['state'],'unverified')
+        self.assertEqual(action['result']['observation']['exit_code'],0)
+        terminal.send('/browser\r'); terminal.wait_text('Browser details')
+        terminal.wait_text('Window/page visibility is unverified')
+        terminal.send('\x1b'); terminal.close()
+
     def test_copy_message_click_preserves_exact_text_with_a_native_helper_fixture(self):
         helpers = self.root/'helpers'; helpers.mkdir()
         helper = helpers/'wl-copy'
@@ -194,13 +246,13 @@ class Alpha(unittest.TestCase):
         texts = ["hello 界\nsecond line", "```sh\nprintf '%s' \"$HOME\"\n```", "Exit: 1\nsudo: a password is required"]
         for (author, kind), text in zip([('alice','human'),("alice's bot",'bot'),('tools','tool')], texts):
             self.sql("INSERT INTO messages(room,author,body,kind) VALUES('lobby',?,?,?)",(author,text,kind))
-        eventually(lambda: terminal.screen().count('[ Copy ]') == 3)
-        buttons = [(i,line.index('[ Copy ]')) for i,line in enumerate(terminal.screen().splitlines()) if '[ Copy ]' in line]
+        eventually(lambda: terminal.screen().count('⧉') == 3)
+        buttons = [(i,line.index('⧉')) for i,line in enumerate(terminal.screen().splitlines()) if '⧉' in line]
         for (y,x), text in zip(buttons,texts):
             terminal.click(x+1,y+1)
             eventually(lambda: copied.exists() and copied.read_text() == text)
             terminal.wait_text('Message copied')
-            eventually(lambda: '[Copied]' in terminal.screen().splitlines()[y])
+            eventually(lambda: '✓' in terminal.screen().splitlines()[y])
         terminal.close()
 
     def test_copy_terminal_fallback_is_encoded_and_does_not_claim_native_success(self):
@@ -208,8 +260,8 @@ class Alpha(unittest.TestCase):
         terminal = self.app(model=self.model('complete'),env={'DISPLAY':'','WAYLAND_DISPLAY':''})
         text = 'hello 界\nexact second line'
         self.sql("INSERT INTO messages(room,author,body,kind) VALUES('lobby','alice',?,'human')",(text,))
-        terminal.wait_text('[ Copy ]')
-        rows = terminal.screen().splitlines(); y = next(i for i,line in enumerate(rows) if '[ Copy ]' in line); x = rows[y].index('[ Copy ]')
+        terminal.wait_text('⧉')
+        rows = terminal.screen().splitlines(); y = next(i for i,line in enumerate(rows) if '⧉' in line); x = rows[y].index('⧉')
         terminal.click(x+1,y+1)
         expected = b'\x1b]52;c;'+base64.b64encode(text.encode())+b'\x1b\\'
         eventually(lambda: expected in b''.join(terminal.chunks))

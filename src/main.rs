@@ -297,7 +297,16 @@ fn main() -> Result<()> {
     }
     if args.history {
         for m in store.history(&args.room)? {
-            println!("{}: {}", safe(&m.author), safe(&m.body));
+            println!(
+                "{}: {}",
+                safe(&m.author),
+                safe(
+                    &bella::tool_action::Action::decode(&m.body)
+                        .filter(|_| m.kind == "tool")
+                        .map(|a| a.details())
+                        .unwrap_or(m.body)
+                )
+            );
         }
         return Ok(());
     }
@@ -319,6 +328,8 @@ fn main() -> Result<()> {
             instructions: String::new(),
             tools: true,
             guest: None,
+            request_id: String::new(),
+            requester: String::new(),
         },
     )?;
     if let Some(parent) = args.data.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -411,7 +422,8 @@ fn doctor(store: &Store, data: &std::path::Path, profile: &settings::Settings) -
 }
 
 impl App {
-    fn new(name: String, room: String, store: Store, config: agent::Config) -> Result<Self> {
+    fn new(name: String, room: String, store: Store, mut config: agent::Config) -> Result<Self> {
+        config.requester = name.clone();
         let existing = profiles::all(store.connection())?;
         let networked = store.connection().query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='network_meta'",
@@ -752,6 +764,27 @@ impl App {
             })
             .collect()
     }
+    fn task_tool_results(&self, task: &tasks::TaskRecord) -> Result<String> {
+        let session: String = self.store.connection().query_row(
+            "SELECT session FROM agent_tasks WHERE id=?1 AND owner=?2",
+            rusqlite::params![task.id, self.name],
+            |r| r.get(0),
+        )?;
+        let request_id = format!("{session}:{}", task.id);
+        let mut query = self.store.connection().prepare(
+            "SELECT body FROM messages WHERE room=?1 AND kind='tool' AND body LIKE 'Tool action v1: %' AND instr(body,?2)>0 ORDER BY id LIMIT 100")?;
+        let mut text = String::new();
+        for row in query.query_map(rusqlite::params![task.room, request_id], |r| {
+            r.get::<_, String>(0)
+        })? {
+            if let Some(action) = bella::tool_action::Action::decode(&row?)
+                && action.result.scope().request_id == request_id
+            {
+                text.push_str(&format!("\n\n{}", safe(&action.details())));
+            }
+        }
+        Ok(text)
+    }
     fn message_copy_text(&self, id: i64) -> Option<String> {
         if id == 0 {
             return self
@@ -762,8 +795,9 @@ impl App {
         }
         let message = self.messages.iter().find(|message| message.id == id)?;
         Some(if message.kind == "tool" {
-            browser::Action::decode(&message.body)
+            bella::tool_action::Action::decode(&message.body)
                 .map(|action| action.details())
+                .or_else(|| browser::Action::decode(&message.body).map(|action| action.details()))
                 .unwrap_or_else(|| message.body.clone())
         } else {
             message.body.clone()
@@ -1772,6 +1806,8 @@ impl App {
         )?;
         tx.commit()?;
         let model = config.model.clone();
+        config.request_id = format!("{}:{id}", self.session);
+        config.requester = self.name.clone();
         let task = agent::start(config, history);
         self.job = Some(Job {
             author,
@@ -1926,6 +1962,8 @@ impl App {
         )?;
         tx.commit()?;
         let model = config.model.clone();
+        config.request_id = format!("{}:{id}", self.session);
+        config.requester = requester.into();
         let task = agent::start(config, history);
         self.job = Some(Job {
             author: author.clone(),

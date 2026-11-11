@@ -32,6 +32,8 @@ Onboarding, participant discovery, launcher-owned model lifecycle and durable ta
 
 ## Next milestones
 
+Harness improvement roadmap (ChatGPT, planned; not delivered): see [docs/HARNESS_ROADMAP.md](docs/HARNESS_ROADMAP.md).
+
 1. Gather alpha feedback and harden usability: grapheme editing, large-history memory bounds, authenticated model endpoints, hardware-aware model setup and additional terminal platforms. Durable task scheduling/replay remains a separate design decision requiring explicit authorization semantics.
 2. Evaluate Pi against the initial agent adapter using the same model and tasks. Retain application-owned tool permissions and prevent bypass through unrestricted built-in tools or extensions.
 3. Introduce cryptographic identity and explicit group membership. Replace shared-database transport with encrypted peer connections, evaluating iroh. Add invitations, message IDs, deduplication, synchronization, and reconnect handling. Test on distinct networks; document relays and offline delivery assumptions.

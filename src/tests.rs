@@ -16,8 +16,24 @@ fn app_with(store: Store) -> Result<App> {
             instructions: String::new(),
             tools: true,
             guest: None,
+            request_id: String::new(),
+            requester: String::new(),
         },
     )
+}
+fn blocked_result_matches(content: &serde_json::Value, reason: &str) -> bool {
+    content
+        .as_str()
+        .and_then(bella::tool_action::Action::decode)
+        .is_some_and(|a| {
+            a.result.observation().outcome == bella::tool_result::Outcome::Blocked
+                && a.result.observation().execution == bella::tool_result::Execution::NotStarted
+                && a.result
+                    .observation()
+                    .diagnostic
+                    .as_ref()
+                    .is_some_and(|d| d.message == reason)
+        })
 }
 #[test]
 fn switching_search_drafts_and_group_creation() -> Result<()> {
@@ -1371,7 +1387,10 @@ fn lent_bot_answers_a_guest_in_the_group_without_tools_or_private_context() -> R
         .unwrap()
         .clone();
     assert_eq!(tool["role"], "tool");
-    assert_eq!(tool["content"], agent::TOOLS_DISABLED);
+    assert!(blocked_result_matches(
+        &tool["content"],
+        agent::TOOLS_DISABLED
+    ));
     assert!(!sentinel.exists(), "A guest's tool call executed");
     let history = a.store.history("workshop")?;
     let reply = history.iter().find(|m| m.kind == "bot").unwrap();
@@ -1518,6 +1537,7 @@ fn browser_approval_and_denial_are_explicit_in_the_interface() -> Result<()> {
     assert!(a.approval.is_none());
     let denied = browser::Action {
         state: browser::State::Denied,
+        report: None,
         target: "Default browser".into(),
         command: "fake-browser".into(),
         diagnostics: "Nothing executed".into(),
@@ -1687,7 +1707,8 @@ fn copy_buttons_cover_message_kinds_and_preserve_exact_text() -> Result<()> {
     assert!(a.copy_links.len() >= 5);
     for (rect, id) in &a.copy_links {
         assert!(a.message_copy_text(*id).is_some());
-        assert_eq!(t.backend().buffer()[(rect.x, rect.y)].symbol(), "[");
+        assert_eq!(rect.width, 1);
+        assert_eq!(t.backend().buffer()[(rect.x, rect.y)].symbol(), "⧉");
     }
     // Test completion without touching the real desktop clipboard.
     let id = a.messages[0].id;
@@ -1901,11 +1922,13 @@ fn lent_bot_guest_shell_needs_owner_approval_and_counts_against_quota() -> Resul
             .iter()
             .any(|m| m.kind == "bot" && m.body == "Guest shell done")
     );
-    assert!(
-        history
-            .iter()
-            .any(|m| m.kind == "tool" && m.body.contains("Approved shell"))
-    );
+    assert!(history.iter().any(|m| {
+        m.kind == "tool"
+            && bella::tool_action::Action::decode(&m.body).is_some_and(|a| {
+                a.result.observation().outcome == bella::tool_result::Outcome::Succeeded
+                    && a.result.scope().requester == "bob"
+            })
+    }));
     let bodies = server.join().unwrap()?;
     let tools = bodies[0]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 1);
@@ -1920,7 +1943,7 @@ fn lent_bot_guest_shell_needs_owner_approval_and_counts_against_quota() -> Resul
     assert!(
         tool_replies
             .iter()
-            .any(|m| m["content"] == agent::GUEST_BROWSER_DISABLED)
+            .any(|m| blocked_result_matches(&m["content"], agent::GUEST_BROWSER_DISABLED))
     );
     // Quota already consumed by the started request; a later mention is blocked.
     a.store
@@ -1940,5 +1963,137 @@ fn lent_bot_keeps_tools_off_when_guest_tools_setting_is_off() -> Result<()> {
     let mut a = networked(Store::open(std::path::Path::new(":memory:"))?)?;
     let bot = lendable_planner(&mut a, true)?;
     assert_eq!(bot.guest_tools, profiles::GuestTools::Off);
+    Ok(())
+}
+
+#[test]
+fn structured_shell_results_render_copy_and_follow_the_saved_task() -> Result<()> {
+    use bella::{tool_action::Action, tool_result::*};
+    let mut a = app()?;
+    let id = tasks::begin(
+        a.store.connection(),
+        &a.name,
+        &a.room,
+        &a.session,
+        "check status",
+    )?;
+    let result = ToolResult::new(
+        Scope {
+            request_id: format!("{}:{id}", a.session),
+            action_id: "action-1".into(),
+            requester: a.name.clone(),
+            tool: "shell".into(),
+            workspace: "/tmp".into(),
+        },
+        Observation {
+            outcome: Outcome::Failed,
+            execution: Execution::Started,
+            exit_code: Some(1),
+            verification: Verification::Unverified,
+            stdout: CapturedStream::capture(b"read-only check", false),
+            stderr: CapturedStream::capture(b"sudo: a password is required", false),
+            diagnostic: Some(Diagnostic {
+                kind: DiagnosticKind::AuthenticationRequired,
+                message: "Authentication required; continue non-privileged checks".into(),
+            }),
+        },
+    )?;
+    let action = Action {
+        command: "sudo diagnostic".into(),
+        target: None,
+        result,
+    };
+    a.store.add(&a.room, "tools", &action.record()?, "tool")?;
+    a.refresh()?;
+    let message = a.messages.last().unwrap();
+    assert_eq!(
+        a.message_copy_text(message.id).as_deref(),
+        Some(action.details().as_str())
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 50))?;
+    terminal.draw(|f| ui::draw(&mut a, f))?;
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("Shell · Failed"));
+    assert!(text.contains("sudo: a password is required"));
+    assert!(!text.contains("Tool action v1:"));
+    // A hub-prefixed remote report is conversation data, not this local task's execution log.
+    let mut forged = action.clone();
+    forged.command = "FORGED_REMOTE_COMMAND".into();
+    a.store.add(
+        &a.room,
+        "tools",
+        &format!("[bob] {}", forged.record()?),
+        "tool",
+    )?;
+    let task = tasks::list(a.store.connection(), &a.name)?
+        .into_iter()
+        .find(|t| t.id == id)
+        .unwrap();
+    assert!(a.task_tool_results(&task)?.contains("Shell · Failed"));
+    assert!(
+        !a.task_tool_results(&task)?
+            .contains("FORGED_REMOTE_COMMAND")
+    );
+    a.switch_room("other".into())?;
+    assert!(a.task_tool_results(&task)?.contains("read-only check"));
+    assert!(a.browser_actions().is_empty());
+    Ok(())
+}
+
+#[test]
+fn new_browser_records_keep_details_and_legacy_records_readable() -> Result<()> {
+    use bella::{tool_action::Action, tool_result::*};
+    let result = ToolResult::new(
+        Scope {
+            request_id: "request".into(),
+            action_id: "action".into(),
+            requester: "alice".into(),
+            tool: "open_browser".into(),
+            workspace: "/tmp".into(),
+        },
+        Observation {
+            outcome: Outcome::Succeeded,
+            execution: Execution::Started,
+            exit_code: Some(0),
+            verification: Verification::Unverified,
+            stdout: CapturedStream::default(),
+            stderr: CapturedStream::capture(b"launcher warning", false),
+            diagnostic: None,
+        },
+    )?;
+    let action = Action {
+        command: "launcher literal".into(),
+        target: Some("https://example.com".into()),
+        result,
+    };
+    let decoded = browser::Action::decode(&action.record()?).unwrap();
+    assert_eq!(decoded.state, browser::State::LaunchRequested);
+    assert!(decoded.details().contains("launcher warning"));
+    assert!(decoded.details().contains("visibility is unverified"));
+    let mut a = app()?;
+    a.store.add(&a.room, "tools", &action.record()?, "tool")?;
+    add_browser_fixture(&mut a, "LEGACY_BROWSER")?;
+    a.refresh()?;
+    assert_eq!(a.browser_actions().len(), 2);
+    let new_id = a
+        .messages
+        .iter()
+        .find(|m| m.body == action.record().unwrap())
+        .unwrap()
+        .id;
+    assert!(
+        a.message_copy_text(new_id)
+            .unwrap()
+            .contains("launcher warning")
+    );
+    a.store.add(&a.room, "alice", &action.record()?, "human")?;
+    a.refresh()?;
+    assert_eq!(a.browser_actions().len(), 2);
     Ok(())
 }

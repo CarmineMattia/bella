@@ -25,6 +25,14 @@ Captured output is capped at 16 KiB per stream. The truncation footer appears on
 
 ## Copying messages
 
-Every user, bot and tool message has a **Copy** button in its header. Copy preserves the full original text, Unicode, code and line breaks rather than the wrapped screen layout. Browser action cards copy a readable report including their command and diagnostics. A streaming reply copies the text received so far.
+Every user, bot and tool message has a compact **⧉** Copy icon in its header. Copy preserves the full original text, Unicode, code and line breaks rather than the wrapped screen layout. Browser action cards copy a readable report including their command and diagnostics. A streaming reply copies the text received so far.
 
-Copying runs in a worker and does not block the chat editor. A successful native clipboard helper shows **Copied**. The app tries available `wl-copy`, `xclip` and `xsel` helpers with bounded execution, passing message text through standard input rather than a shell. If no native helper works, it sends an encoded OSC 52 request to the terminal and shows **Sent**, since terminal clipboard permissions and support cannot be confirmed by the app. Terminal fallback is limited to 64 KiB of source text; larger messages require a native helper. Copy never sends message text to the model or the network.
+Copying runs in a worker and does not block the chat editor. A successful native clipboard helper shows **✓**. The app tries available `wl-copy`, `xclip` and `xsel` helpers with bounded execution, passing message text through standard input rather than a shell. If no native helper works, it sends an encoded OSC 52 request to the terminal and shows **↗**, since terminal clipboard permissions and support cannot be confirmed by the app. Terminal fallback is limited to 64 KiB of source text; larger messages require a native helper. Copy never sends message text to the model or the network.
+
+## Structured runtime results
+
+New shell and browser results are stored as versioned action records. Chat, model tool responses, readable Copy text, `--history` and task details use the same outcome: Succeeded, Failed, Timed out, Cancelled, Denied or Blocked. Browser success means **Launch requested**, with window/page visibility still unverified. Older text output and browser cards remain readable.
+
+Owner timeouts are measured by the parent process, rather than inferred from exit code 124 or output text. Started commands may have external effects even after failure, timeout or cancellation. Guest Stop retains its separate process-group behavior. Existing approval and request-wide denial rules remain enforced in code.
+
+Records fit the hub's 64 KiB message limit by reducing captured output when necessary and explicitly marking that reduction. Commands are preserved exactly; shell proposals exceeding the 8 KiB review limit and browser URLs exceeding 4 KiB fail before execution. See [the result contract](TOOL_RESULT_CONTRACT.md) for scope, compatibility and remaining work.

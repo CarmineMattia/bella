@@ -609,6 +609,9 @@ struct HistoryLines {
     copy_links: Vec<(i64, usize, usize, usize)>,
 }
 fn message_preview(body: &str) -> String {
+    if let Some(action) = bella::tool_action::Action::decode(body) {
+        return format!("{} · {}", action.title(), single_line(&action.command));
+    }
     crate::browser::Action::decode(body)
         .map(|action| format!("{} · {}", action.title(), single_line(&action.target)))
         .unwrap_or_else(|| single_line(body))
@@ -670,7 +673,15 @@ fn bubble_lines(app: &App, width: u16) -> HistoryLines {
         let display_body = browser_action
             .as_ref()
             .map(|action| action.summary())
-            .unwrap_or_else(|| m.body.clone());
+            .unwrap_or_else(|| {
+                if m.kind == "tool" {
+                    bella::tool_action::Action::decode(&m.body)
+                        .map(|a| a.details())
+                        .unwrap_or_else(|| m.body.clone())
+                } else {
+                    m.body.clone()
+                }
+            });
         let body = wrap_text(
             &safe(&display_body).replace('\t', "    "),
             max_bubble.saturating_sub(4).max(1),
@@ -680,7 +691,7 @@ fn bubble_lines(app: &App, width: u16) -> HistoryLines {
             .map(|l| l.width())
             .max()
             .unwrap_or(0)
-            .max(author.width().saturating_add(9))
+            .max(author.width().saturating_add(2))
             .max(if own && app.network.is_some() { 24 } else { 18 })
             .min(max_bubble.saturating_sub(4).max(1));
         let bubble_width = content_width + 4;
@@ -726,14 +737,14 @@ fn bubble_lines(app: &App, width: u16) -> HistoryLines {
         };
         let details_row = avatar_start + 1 + body.len();
         let copy_label = match app.copy_feedback {
-            Some((id, when, true)) if id == m.id && when.elapsed().as_secs() < 2 => "[Copied]",
-            Some((id, when, false)) if id == m.id && when.elapsed().as_secs() < 2 => "[ Sent ]",
-            _ => "[ Copy ]",
+            Some((id, when, true)) if id == m.id && when.elapsed().as_secs() < 2 => "✓",
+            Some((id, when, false)) if id == m.id && when.elapsed().as_secs() < 2 => "↗",
+            _ => "⧉",
         };
-        let copy_width = content_width.min(copy_label.len());
+        let copy_width = content_width.min(copy_label.width());
         let copy_x = content_width.saturating_sub(copy_width);
-        let heading = if content_width >= copy_label.len() + 2 {
-            let name = clip(&author, content_width - copy_label.len() - 1);
+        let heading = if content_width >= copy_label.width() + 2 {
+            let name = clip(&author, content_width - copy_label.width() - 1);
             format!(
                 "{}{}{}",
                 name,
@@ -1207,7 +1218,7 @@ fn draw_dialog(app: &App, f: &mut Frame) {
                     "you".to_owned()
                 } else {
                     format!(
-                        "{} · delegated request, chat only, tools disabled",
+                        "{} · delegated request; execution governed by saved action policy",
                         safe(&task.requester)
                     )
                 },
@@ -1220,6 +1231,11 @@ fn draw_dialog(app: &App, f: &mut Frame) {
                 },
                 safe(&task.partial),
                 safe(&task.error)
+            );
+            let body = format!(
+                "{body}{}",
+                app.task_tool_results(task)
+                    .unwrap_or_else(|_| "\nTool results could not be loaded.".into())
             );
             draw_info(
                 f,
