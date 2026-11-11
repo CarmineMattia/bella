@@ -156,7 +156,12 @@ pub fn draw(app: &mut App, f: &mut Frame) {
                 crate::agent::Phase::RunningCommand => "Running an approved command…",
             }
         }
-        .into()
+        .to_owned()
+            + &job
+                .skill
+                .as_ref()
+                .map(|name| format!(" · skill {name}"))
+                .unwrap_or_default()
     } else if app.room.starts_with("agent:") {
         match app.health {
             Some(true) => "●  Local model connected".into(),
@@ -954,7 +959,7 @@ pub fn dialog_rect(area: Rect, dialog: &Dialog) -> Rect {
             13
         } else if *dialog == Dialog::ModelInfo {
             24
-        } else if *dialog == Dialog::Help {
+        } else if matches!(dialog, Dialog::Help | Dialog::Skills) {
             28
         } else if *dialog == Dialog::NewGroup {
             12
@@ -1291,6 +1296,17 @@ fn draw_dialog(app: &App, f: &mut Frame) {
         );
         return;
     }
+    if app.dialog == Some(Dialog::Skills) {
+        draw_info(
+            f,
+            inner,
+            "Skills",
+            &app.skills_report(),
+            "R Rescan · PgUp/PgDn Scroll · Esc Close",
+            app.dialog_scroll,
+        );
+        return;
+    }
     if app.dialog == Some(Dialog::ModelInfo) {
         let body = format!(
             "Model\n{}\n\nServer\n{}\n\nWorkspace\n{}\n\n{}\n\nR checks the connection again.\nStart the model with scripts/start-model if offline.\nEsc closes this window.",
@@ -1314,7 +1330,7 @@ fn draw_dialog(app: &App, f: &mut Frame) {
             f,
             inner,
             "Make yourself at home",
-            "Ctrl+K          Search chats and latest messages\nCtrl+F          Search all messages in this chat\nCtrl+End        Jump to latest messages\nCtrl+N          Create a group\nTab / Shift+Tab Next / previous chat\nClick a chat    Open it\nClick Copy      Copy the full message text\nMouse wheel     Scroll messages\nEnter / Send    Send message\nAlt+Enter       Add a newline\nLeft / Right    Move message cursor\nHome / End      Beginning / end of message\nCtrl+U          Clear draft\nCtrl+R          Retry a failed agent request\nCtrl+X / Stop   Stop the agent response\nF2 / Ctrl+O     Model connection details\nF3 / Right-click Chat options: pin and archive\nF4              Chats / Archive folder\nF5 / /tasks     Agent activity and crash recovery\nF6 / /people    People and local session presence\nF7 / /profile   Edit your name, bio and picture\nF8 / /bots      Create, edit and add bots to this chat\nF9 / /network   Hub connection and outgoing queue\nF10 / Group/Bot Select message recipient (remembered per chat)\nF11 / /browser Browser actions and launcher diagnostics\n/to group       Return to ordinary group messages\n/to @handle     Address your enabled bot without typing a tag\n@bot task       Ask your agent in a group\n/agent          Open your agent conversation\n/welcome        Save draft and return to welcome setup\n/join name      Open or create a group\nCtrl+C / /quit  Quit\n\nMessages are shared locally. Times are UTC.\nEsc closes this window.",
+            "Ctrl+K          Search chats and latest messages\nCtrl+F          Search all messages in this chat\nCtrl+End        Jump to latest messages\nCtrl+N          Create a group\nTab / Shift+Tab Next / previous chat\nClick a chat    Open it\nClick Copy      Copy the full message text\nMouse wheel     Scroll messages\nEnter / Send    Send message\nAlt+Enter       Add a newline\nLeft / Right    Move message cursor\nHome / End      Beginning / end of message\nCtrl+U          Clear draft\nCtrl+R          Retry a failed agent request\nCtrl+X / Stop   Stop the agent response\nF2 / Ctrl+O     Model connection details\nF3 / Right-click Chat options: pin and archive\nF4              Chats / Archive folder\nF5 / /tasks     Agent activity and crash recovery\nF6 / /people    People and local session presence\nF7 / /profile   Edit your name, bio and picture\nF8 / /bots      Create, edit and add bots to this chat\nF9 / /network   Hub connection and outgoing queue\nF10 / Group/Bot Select message recipient (remembered per chat)\nF11 / /browser Browser actions and launcher diagnostics\n/skills         Skills: roots, enabled, disabled, diagnostics\n$skill task     Ask your agent using one skill\n/to group       Return to ordinary group messages\n/to @handle     Address your enabled bot without typing a tag\n@bot task       Ask your agent in a group\n/agent          Open your agent conversation\n/welcome        Save draft and return to welcome setup\n/join name      Open or create a group\nCtrl+C / /quit  Quit\n\nMessages are shared locally. Times are UTC.\nEsc closes this window.",
             "PgUp/PgDn Scroll · Esc Close",
             app.dialog_scroll,
         );

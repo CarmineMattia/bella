@@ -235,6 +235,24 @@ class Alpha(unittest.TestCase):
         terminal.wait_text('Window/page visibility is unverified')
         terminal.send('\x1b'); terminal.close()
 
+    def test_skills_window_lists_bundled_skills_and_unknown_skills_never_reach_the_model(self):
+        workspace=self.root/'workspace'; workspace.mkdir()
+        settings=self.root/'settings.json'
+        settings.write_text(json.dumps({'name':'alice','endpoint':'http://127.0.0.1:9/v1','model':'fixture','workspace':str(workspace)}))
+        model=self.model('complete'); terminal=self.app(model=model)
+        self.assertTrue((self.root/'bundled-skills'/'linux-diagnostics'/'SKILL.md').is_file())
+        terminal.send('/skills\r'); terminal.wait_text('R Rescan')
+        terminal.wait_text('$browser-check'); terminal.wait_text('$linux-diagnostics')
+        terminal.send('\x1b'); terminal.send('@bot $no-such-skill check\r')
+        terminal.wait_text('no skill named')
+        terminal.send('\x15'); terminal.send('/skills disable browser-check\r')
+        eventually(lambda:json.loads(settings.read_text()).get('disabled_skills')==['browser-check'])
+        self.assertEqual(json.loads(settings.read_text())['endpoint'],'http://127.0.0.1:9/v1')
+        terminal.send('@bot $browser-check open it\r'); terminal.wait_text('is disabled')
+        self.assertEqual(model.requests,0)
+        self.assertFalse(self.sql("SELECT 1 FROM messages WHERE body LIKE '%skill%'"))
+        terminal.close()
+
     def test_copy_message_click_preserves_exact_text_with_a_native_helper_fixture(self):
         helpers = self.root/'helpers'; helpers.mkdir()
         helper = helpers/'wl-copy'

@@ -8,7 +8,6 @@
 //! never executes, downloads or installs anything. Files next to a
 //! `SKILL.md` (scripts, references) are only listed, never read or run.
 //! See `docs/SKILLS.md`.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -37,14 +36,51 @@ impl Root {
     }
 }
 
-/// Default roots, highest priority first: the owner's data directory, then
-/// the workspace. Owner-installed skills win so a cloned repository cannot
-/// silently replace a skill the owner already trusts.
+/// Default roots, highest priority first: the owner's data directory, the
+/// workspace, then the skills shipped with Bella. Owner-installed skills win
+/// so a cloned repository cannot silently replace a skill the owner already
+/// trusts, and any bundled skill can be overridden by copying it to `user`.
 pub fn default_roots(data_dir: &Path, workspace: &Path) -> Vec<Root> {
     vec![
         Root::new("user", data_dir.join("skills")),
         Root::new("workspace", workspace.join(".bella").join("skills")),
+        Root::new("bundled", bundled_dir(data_dir)),
     ]
+}
+
+/// Skills shipped inside the binary (sources in the repository's `skills/`).
+pub const BUNDLED: &[(&str, &str)] = &[
+    (
+        "browser-check",
+        include_str!("../skills/browser-check/SKILL.md"),
+    ),
+    (
+        "linux-diagnostics",
+        include_str!("../skills/linux-diagnostics/SKILL.md"),
+    ),
+];
+
+/// App-owned copy of the bundled skills, refreshed by [`install_bundled`].
+/// Edits here are replaced; override a skill in the `user` root instead.
+pub fn bundled_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("bundled-skills")
+}
+
+/// Writes the bundled skills to `dir`, rewriting only files whose content
+/// differs. Other entries are left alone. Nothing is downloaded or run.
+pub fn install_bundled(dir: &Path) -> std::io::Result<()> {
+    for (name, content) in BUNDLED {
+        let skill_dir = dir.join(name);
+        let file = skill_dir.join(SKILL_FILE);
+        if fs::read(&file).is_ok_and(|old| old == content.as_bytes()) {
+            continue;
+        }
+        fs::create_dir_all(&skill_dir)?;
+        let temp = skill_dir.join(format!(".{SKILL_FILE}.tmp-{}", std::process::id()));
+        fs::write(&temp, content)?;
+        fs::rename(&temp, &file)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1105,13 +1141,50 @@ mod tests {
         let roots = default_roots(&t.0.join("data"), &t.0.join("ws"));
         assert_eq!(roots[0].path, t.0.join("data/skills"));
         assert_eq!(roots[1].path, t.0.join("ws/.bella/skills"));
+        assert_eq!(roots[2].path, t.0.join("data/bundled-skills"));
         fs::write(t.0.join("file"), "").unwrap();
         let mut all = roots.clone();
         all.push(Root::new("file", t.0.join("file")));
         let cat = discover(&all, &[], &Limits::default());
         assert_eq!(cat.roots[0].status, RootStatus::Missing);
-        assert_eq!(cat.roots[2].status, RootStatus::Unusable);
+        assert_eq!(cat.roots[3].status, RootStatus::Unusable);
         assert!(has(&cat, |k| *k == DiagnosticKind::RootNotDirectory));
+    }
+
+    #[test]
+    fn bundled_skills_install_validate_and_can_be_overridden() {
+        let t = Tmp::new("bundled");
+        let data = t.0.join("data");
+        let ws = t.0.join("ws");
+        install_bundled(&bundled_dir(&data)).unwrap();
+        let l = Limits::default();
+        let cat = discover(&default_roots(&data, &ws), &[], &l);
+        assert!(cat.diagnostics.is_empty(), "{:#?}", cat.diagnostics);
+        let names: Vec<_> = cat.skills.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["browser-check", "linux-diagnostics"]);
+        assert!(cat.skills.iter().all(|m| m.root == "bundled"));
+        // The metadata of both fits a small-model prompt budget.
+        assert!(!prompt_block(&cat.skills, 2500).contains("not listed"));
+        // Browser skill must not let the model claim page control.
+        let b = cat.load("browser-check", &l).unwrap().instructions;
+        assert!(b.contains("only asks the desktop launcher to open a page"));
+        assert!(b.contains("does not verify the page appeared"));
+        assert!(b.contains("Never say the page is open"));
+        // A user copy overrides the bundled one; reinstall leaves it alone.
+        write(
+            &data.join("skills"),
+            "browser-check",
+            skill("browser-check", "mine", "b"),
+        );
+        let edited = bundled_dir(&data)
+            .join("linux-diagnostics")
+            .join(SKILL_FILE);
+        fs::write(&edited, "tampered").unwrap();
+        install_bundled(&bundled_dir(&data)).unwrap();
+        assert_eq!(fs::read_to_string(&edited).unwrap(), BUNDLED[1].1);
+        let cat = discover(&default_roots(&data, &ws), &[], &l);
+        assert_eq!(cat.get("browser-check").unwrap().root, "user");
+        assert!(has(&cat, |k| matches!(k, DiagnosticKind::Shadowed { .. })));
     }
 
     #[test]

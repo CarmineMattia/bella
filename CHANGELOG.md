@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — 2026-11-11
+
+- Skills, explicit selection only. Start a request to your own agent with `$name` to add one skill's instructions to that request. A chat note and the header status show the active skill. An unknown or disabled name sends nothing and keeps your draft. `/skills` shows roots, enabled and disabled skills, versions and diagnostics. `/skills disable|enable NAME` is saved as an optional `disabled_skills` list in `settings.json`; older files load unchanged. Owner requests carry a compact metadata block of at most 2,500 characters. Skills never change tools, approvals or denial. Guests of lent bots never get skills. Bella ships `linux-diagnostics` and `browser-check` (installed to `<data-dir>/bundled-skills/`, lowest priority, overridable in `<data-dir>/skills/`).
+
 ## Unreleased — 2026-11-10
 
 - Optional guest shell for lent bots (level 3), off by default. A new per-bot, device-local *Guest tools when lent* setting (`off`/`shell`) is never synced. When enabled, a guest request may propose `shell` only — never `open_browser`. Every command still needs the owner's approval, which names the guest and the working directory. Commands run in `<data-dir>/guests/<guest>/` with a scrubbed environment, CPU/RAM caps and no time limit; Stop still kills a runaway command. This is not a sandbox: the process runs as the owner's Linux user and can read files outside that folder. Guest tool use counts against the existing per-guest hourly request quota. The owner's own tools are unchanged.

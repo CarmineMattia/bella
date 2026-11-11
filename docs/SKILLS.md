@@ -1,6 +1,6 @@
-# Skills (standalone loader)
+# Skills
 
-Status: **not wired into the agent yet.** `src/skills.rs` is a standalone loader for roadmap item P4. It discovers and validates skills and can produce prompt text, but no request uses it yet. There is no UI and no implicit selection.
+Status: roadmap item P4, slice 2. Skills are connected to the owner's own agent requests and can only be selected **explicitly** with `$name`. There is no implicit selection yet.
 
 A skill is a directory with a `SKILL.md`. Skills are plain instructions. They never create tools, permissions or approvals. The loader never executes, downloads or installs anything.
 
@@ -26,14 +26,32 @@ Instructions for the model…
 
 Compatibility with any public skill specification (Codex, Agent Skills) is **not claimed** until it is tested.
 
+## Using skills in the app
+
+- Start a request to your agent with `$name`. In `/agent` that is `$linux-diagnostics is sshd running?`; in a group it is `@bot $linux-diagnostics …`, or the same text with Bot selected in the composer. The app loads that skill's instructions for this request only and sends the rest of the message as the request.
+- The chat shows a note, **Skill linux-diagnostics · bundled · instructions only; tools and approvals unchanged**. The header status shows `· skill NAME` while the request runs.
+- If the name matches no enabled skill, nothing is sent and your draft is kept. The status explains why: no skill with that name, or the skill is disabled. A `$` later in the message, or a name that is not a valid skill name such as `$HOME`, selects nothing, and the message goes out as ordinary text.
+- `/skills` opens a window that lists the roots, enabled and disabled skills with their source and version, and the diagnostics. **R** scans again.
+- `/skills disable NAME` and `/skills enable NAME` change the `disabled_skills` list in `settings.json`. Existing settings files without that key load unchanged, and the key is left out while the list is empty. If no settings file exists, the change lasts only for the current session.
+- Every owner request includes the compact metadata block, so the model knows which skills exist. The budget is 2,500 characters, kept small for local models. Only the selected skill's full instructions are added.
+- A skill never changes the tool list, approvals or denial handling. The owner still approves every command. A denial still ends the tool phase for that request when a skill is active.
+- **Guests of lent bots never get skills in this version.** That covers both chat-only and guest shell. A guest's `$name` is sent as ordinary text, with no metadata and no instructions. The agent applies this rule even if a caller forgets to clear the skill fields. Lent bots may get reviewed skills in a later slice.
+
+Discovery runs at startup, before each of your agent requests, and when `/skills` opens, so edits on disk take effect without a restart. Loading a selected skill checks its file again.
+
 ## Roots and priority
 
 Roots are passed in priority order. The default roots, highest priority first, are:
 
 1. `user`: `<data-dir>/skills/<name>/SKILL.md`
 2. `workspace`: `<workspace>/.bella/skills/<name>/SKILL.md`
+3. `bundled`: `<data-dir>/bundled-skills/<name>/SKILL.md`
 
-Owner-installed skills win so that a cloned repository cannot silently replace a skill the owner already uses. Only direct subdirectories of a root are examined. Hidden entries (`.name`) are skipped, as are plain files. There is no recursive traversal. A missing root is reported as `Missing` and is not an error.
+Owner-installed skills win so that a cloned repository cannot silently replace a skill the owner already uses.
+
+### Bundled skills
+
+The repository's `skills/` directory holds the skills shipped with Bella: `linux-diagnostics` and `browser-check`. They are compiled into the binary. At startup the app writes them to `<data-dir>/bundled-skills/`, rewriting a file only when its content differs. That directory belongs to the app, and edits there are replaced. To change a bundled skill, copy its folder to `<data-dir>/skills/` and edit the copy: the `user` root wins, and the bundled copy shows as `Shadowed`. To turn one off, use `/skills disable NAME`. Nothing is downloaded. `browser-check` states that `open_browser` only asks the launcher to open a page and does not verify, read or control it. Only direct subdirectories of a root are examined. Hidden entries (`.name`) are skipped, as are plain files. There is no recursive traversal. A missing root is reported as `Missing` and is not an error.
 
 **Duplicates:** the first valid skill with a given name, in root priority order, wins. Later copies are reported as `Shadowed` diagnostics that name the winning path. Within a root, names are unique because the name must match the directory.
 
@@ -75,7 +93,9 @@ A message selects a skill only when it **starts** with `$name` followed by white
 
 ## Not done yet
 
-- Not connected to the agent, settings or UI: no roots are read at startup, no disabled list is persisted, and the active skill is not shown.
-- No implicit selection (the model choosing a skill from descriptions), and no trigger or non-trigger evaluation.
+- No implicit selection, where the model chooses a skill from its description, and no trigger or non-trigger evaluation.
+- No skills for guests of lent bots.
+- No `crash-investigation` skill yet.
+- The active skill is not saved with the task record. It is visible only through the chat note and the status while the request runs.
 - Instructions that reference resources are not checked for missing files.
 - No installer: copying a skill directory into a root is the only way to add one.

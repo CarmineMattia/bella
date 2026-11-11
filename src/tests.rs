@@ -18,6 +18,8 @@ fn app_with(store: Store) -> Result<App> {
             guest: None,
             request_id: String::new(),
             requester: String::new(),
+            skills_prompt: String::new(),
+            skill: None,
         },
     )
 }
@@ -332,6 +334,7 @@ fn streamed_replies_stay_in_their_origin_chat() -> Result<()> {
         room: "lobby".into(),
         events: rx,
         requester: None,
+        skill: None,
     });
     a.switch_room("other".into())?;
     tx.send(agent::Event::Delta("Hello".into()))?;
@@ -585,6 +588,7 @@ fn stopping_preserves_partial_reply_in_origin_and_blocks_pending_approval() -> R
         room: "lobby".into(),
         events: rx,
         requester: None,
+        skill: None,
     });
     a.switch_room("other".into())?;
     a.stop_agent()?;
@@ -698,6 +702,7 @@ fn archive_does_not_interrupt_the_agent_or_redirect_its_reply() -> Result<()> {
         room: "lobby".into(),
         events: rx,
         requester: None,
+        skill: None,
     });
     a.open_chat_actions("lobby".into());
     a.chat_action(1)?;
@@ -2095,5 +2100,232 @@ fn new_browser_records_keep_details_and_legacy_records_readable() -> Result<()> 
     a.store.add(&a.room, "alice", &action.record()?, "human")?;
     a.refresh()?;
     assert_eq!(a.browser_actions().len(), 2);
+    Ok(())
+}
+/// Points the app at fresh skill roots (bundled installed) under a temp dir.
+fn with_skills(a: &mut App, tag: &str) -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("bella-app-skills-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("ws"))?;
+    a.data_dir = dir.clone();
+    a.config.workspace = dir.join("ws");
+    let settings = dir.join("settings.json");
+    settings::Settings {
+        name: "alice".into(),
+        workspace: dir.join("ws"),
+        ..settings::Settings::default()
+    }
+    .save(&settings)?;
+    a.init_skills(Vec::new(), Some(settings));
+    Ok(dir)
+}
+fn system_prompts(body: &serde_json::Value) -> Vec<String> {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "system")
+        .map(|m| m["content"].as_str().unwrap().to_owned())
+        .collect()
+}
+fn own_job(a: &mut App) -> Result<()> {
+    let end = Instant::now() + Duration::from_secs(10);
+    while a.job.is_some() && Instant::now() < end {
+        a.poll_job()?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(a.job.is_none(), "Agent job did not finish");
+    Ok(())
+}
+#[test]
+fn explicit_skill_selection_injects_instructions_and_shows_the_active_skill() -> Result<()> {
+    let (endpoint, server) = mock_model(vec![
+        serde_json::json!({"role":"assistant","content":"sshd is active"}),
+    ])?;
+    let mut a = app()?;
+    a.config.endpoint = endpoint;
+    let dir = with_skills(&mut a, "select")?;
+    a.switch_room("agent:alice".into())?;
+    a.submit("$linux-diagnostics is sshd running?".into())?;
+    assert_eq!(
+        a.job.as_ref().unwrap().skill.as_deref(),
+        Some("linux-diagnostics")
+    );
+    assert!(a.status.contains("skill linux-diagnostics"), "{}", a.status);
+    let mut terminal = Terminal::new(TestBackend::new(120, 36))?;
+    terminal.draw(|f| ui::draw(&mut a, f))?;
+    assert!(contents(&terminal).contains("skill linux-diagnostics"));
+    own_job(&mut a)?;
+    let body = server.join().unwrap()?.remove(0);
+    let system = system_prompts(&body);
+    let meta = system
+        .iter()
+        .find(|s| s.starts_with("<skill-metadata trust=\"untrusted\">"))
+        .expect("skill metadata block");
+    assert!(meta.contains("- linux-diagnostics: ") && meta.contains("- browser-check: "));
+    assert!(meta.chars().count() <= SKILLS_PROMPT_BUDGET);
+    let instructions = system
+        .iter()
+        .find(|s| {
+            s.starts_with("<skill-instructions name=\"linux-diagnostics\" source=\"bundled\"")
+        })
+        .expect("selected skill instructions");
+    assert!(instructions.contains("read-only commands"));
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.last().unwrap()["content"],
+        "alice: is sshd running?"
+    );
+    let tools: Vec<_> = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tools,
+        ["shell", "open_browser"],
+        "a skill changed the tool list"
+    );
+    let history = a.store.history("agent:alice")?;
+    assert!(history.iter().any(|m| {
+        m.kind == "tool"
+            && m.body
+                .starts_with("Skill linux-diagnostics · bundled · instructions only")
+    }));
+    assert_eq!(history.last().unwrap().body, "sshd is active");
+    // Without a selector, metadata is offered but no instructions are injected.
+    let (endpoint, server) = mock_model(vec![
+        serde_json::json!({"role":"assistant","content":"plain"}),
+    ])?;
+    a.config.endpoint = endpoint;
+    a.submit("how are you".into())?;
+    assert_eq!(a.job.as_ref().unwrap().skill, None);
+    own_job(&mut a)?;
+    let system = system_prompts(&server.join().unwrap()?[0]);
+    assert!(system.iter().any(|s| s.starts_with("<skill-metadata")));
+    assert!(!system.iter().any(|s| s.starts_with("<skill-instructions")));
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+#[test]
+fn unknown_or_disabled_skills_keep_the_draft_and_never_run() -> Result<()> {
+    let mut a = app()?;
+    let dir = with_skills(&mut a, "unknown")?;
+    a.switch_room("agent:alice".into())?;
+    let before = a.store.history("agent:alice")?.len();
+    a.submit("$no-such-skill check things".into())?;
+    assert!(a.job.is_none());
+    assert_eq!(a.input.text, "$no-such-skill check things");
+    assert!(
+        a.status.contains("no skill named \"no-such-skill\""),
+        "{}",
+        a.status
+    );
+    a.submit("/skills disable linux-diagnostics".into())?;
+    assert!(a.status.contains("disabled"), "{}", a.status);
+    let saved = settings::Settings::load(&dir.join("settings.json"))?.unwrap();
+    assert_eq!(saved.disabled_skills, ["linux-diagnostics"]);
+    assert_eq!(saved.name, "alice");
+    a.submit("$linux-diagnostics check".into())?;
+    assert!(a.job.is_none());
+    assert!(a.status.contains("is disabled"), "{}", a.status);
+    assert_eq!(
+        a.store.history("agent:alice")?.len(),
+        before,
+        "a rejected request was sent"
+    );
+    a.submit("/skills".into())?;
+    assert!(a.dialog == Some(Dialog::Skills));
+    let report = a.skills_report();
+    assert!(report.contains("Enabled (1)") && report.contains("Disabled (1)"));
+    assert!(report.contains("$linux-diagnostics · bundled · v1"));
+    assert!(report.contains("bundled ·") && report.contains("user ·"));
+    let mut terminal = Terminal::new(TestBackend::new(120, 40))?;
+    terminal.draw(|f| ui::draw(&mut a, f))?;
+    let screen = contents(&terminal);
+    assert!(screen.contains("Skills") && screen.contains("R Rescan"));
+    a.dialog = None;
+    a.submit("/skills enable linux-diagnostics".into())?;
+    assert!(
+        settings::Settings::load(&dir.join("settings.json"))?
+            .unwrap()
+            .disabled_skills
+            .is_empty()
+    );
+    assert!(a.skills.get("linux-diagnostics").is_some());
+    a.submit("/skills frobnicate".into())?;
+    assert!(a.status.starts_with("Use /skills"));
+    // Selection parsing for agent requests.
+    let (prefix, sel) = skill_selection("@planner $browser-check open it").unwrap();
+    assert_eq!(
+        (prefix.as_str(), sel.name, sel.rest),
+        ("@planner ", "browser-check", "open it")
+    );
+    assert!(skill_selection("@planner echo $HOME").is_none());
+    assert!(skill_selection("@planner").is_none());
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+#[test]
+fn guests_of_a_lent_bot_never_get_skills() -> Result<()> {
+    let (endpoint, server) = mock_model(vec![
+        serde_json::json!({"role":"assistant","content":"Guest answer"}),
+    ])?;
+    let mut a = networked(Store::open(std::path::Path::new(":memory:"))?)?;
+    a.config.endpoint = endpoint;
+    let dir = with_skills(&mut a, "guest")?;
+    lendable_planner(&mut a, true)?;
+    a.store.add(
+        "workshop",
+        "bob",
+        "@planner $linux-diagnostics run checks",
+        "human",
+    )?;
+    a.poll_delegated()?;
+    assert_eq!(a.job.as_ref().unwrap().skill, None);
+    finish_job(&mut a)?;
+    let body = server.join().unwrap()?.remove(0);
+    let text = body.to_string();
+    assert!(!text.contains("skill-metadata") && !text.contains("skill-instructions"));
+    assert!(!text.contains("read-only commands"));
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.last().unwrap()["content"],
+        "bob: @planner $linux-diagnostics run checks"
+    );
+    assert!(
+        !a.store
+            .history("workshop")?
+            .iter()
+            .any(|m| m.kind == "tool")
+    );
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+#[test]
+fn browser_skill_says_the_launcher_does_not_verify_the_page() -> Result<()> {
+    let (endpoint, server) =
+        mock_model(vec![serde_json::json!({"role":"assistant","content":"ok"})])?;
+    let mut a = app()?;
+    a.config.endpoint = endpoint;
+    let dir = with_skills(&mut a, "browser")?;
+    a.switch_room("agent:alice".into())?;
+    a.submit("$browser-check open https://example.com".into())?;
+    own_job(&mut a)?;
+    let body = server.join().unwrap()?.remove(0);
+    let system = system_prompts(&body);
+    let skill = system
+        .iter()
+        .find(|s| s.starts_with("<skill-instructions name=\"browser-check\""))
+        .unwrap();
+    assert!(skill.contains("only asks the desktop launcher to open a page"));
+    assert!(skill.contains("does not verify the page appeared"));
+    assert!(skill.contains("Never say the page is open"));
+    assert!(skill.contains("grants no tools or permissions"));
+    // Skill text comes after the app's own policy prompt, which is unchanged.
+    assert!(system[0].contains("browser"));
+    assert!(!system[0].contains("<skill"));
+    std::fs::remove_dir_all(dir)?;
     Ok(())
 }
