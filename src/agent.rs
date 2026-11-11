@@ -57,6 +57,21 @@ pub struct Config {
     pub guest: Option<GuestContext>,
     pub request_id: String,
     pub requester: String,
+    /// Compact skill metadata for the system prompt (`skills::prompt_block`).
+    /// Used only for the owner's own requests; empty means no skills.
+    pub skills_prompt: String,
+    /// Skill the owner selected with `$name` for this request. Instructions only:
+    /// it never changes the tool list, approvals or denial handling.
+    pub skill: Option<ActiveSkill>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveSkill {
+    pub name: String,
+    /// `LoadedSkill::prompt_block()`, marked as untrusted skill content.
+    pub instructions: String,
+    /// The request with the `$name` selector removed, sent in place of the
+    /// requester's latest message.
+    pub request: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestContext {
@@ -190,6 +205,16 @@ async fn run(
     if !config.instructions.is_empty() {
         messages.push(json!({"role":"system","content":format!("Bot identity: {}. Additional instructions: {}", config.author, config.instructions)}));
     }
+    // Skills are an owner-only feature: delegated (guest) requests never see them,
+    // even if a caller forgot to clear these fields.
+    let owner_request = config.tools && config.guest.is_none();
+    let skill = config.skill.as_ref().filter(|_| owner_request);
+    if owner_request && !config.skills_prompt.is_empty() {
+        messages.push(json!({"role":"system","content":config.skills_prompt}));
+    }
+    if let Some(skill) = skill {
+        messages.push(json!({"role":"system","content":skill.instructions}));
+    }
     // Limit context; each turn is labelled so human messages cannot impersonate the agent role.
     let mut recent: Vec<_> = history
         .into_iter()
@@ -198,14 +223,23 @@ async fn run(
         .take(24)
         .collect();
     recent.reverse();
-    for message in recent {
+    let selected = skill.and_then(|_| {
+        recent
+            .iter()
+            .rposition(|m| m.kind == "human" && m.author == config.requester)
+    });
+    for (index, message) in recent.into_iter().enumerate() {
+        let body = match skill {
+            Some(skill) if selected == Some(index) => skill.request.as_str(),
+            _ => message.body.as_str(),
+        };
         messages.push(
             if message.kind == "bot"
                 && (config.author.is_empty() || message.author == config.author)
             {
-                json!({"role":"assistant", "content":message.body})
+                json!({"role":"assistant", "content":body})
             } else {
-                json!({"role":"user", "content":format!("{}: {}", message.author, message.body)})
+                json!({"role":"user", "content":format!("{}: {}", message.author, body)})
             },
         );
     }
@@ -1279,6 +1313,8 @@ mod tests {
             guest: None,
             request_id: "test-request".into(),
             requester: "owner".into(),
+            skills_prompt: String::new(),
+            skill: None,
         }
     }
     fn tool_reply(command: &str) -> Value {
@@ -1498,6 +1534,8 @@ mod tests {
                 guest: None,
                 request_id: "test-request".into(),
                 requester: "owner".into(),
+                skills_prompt: String::new(),
+                skill: None,
             },
             Vec::new(),
         );
@@ -1765,6 +1803,8 @@ mod tests {
                 requester: requester.into(),
                 home,
             }),
+            skills_prompt: String::new(),
+            skill: None,
         }
     }
 
@@ -1952,6 +1992,200 @@ mod tests {
             "Stop did not kill the guest command"
         );
         let _ = std::fs::remove_dir_all(home);
+        Ok(())
+    }
+
+    /// Multi-turn JSON model server that records each request body.
+    fn scripted(
+        replies: Vec<Value>,
+    ) -> Result<(String, std::thread::JoinHandle<Result<Vec<Value>>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}/v1", listener.local_addr()?);
+        let worker = std::thread::spawn(move || -> Result<Vec<Value>> {
+            let mut bodies = vec![];
+            for message in replies {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                bodies.push(consume_request(&mut stream)?);
+                let payload = json!({"choices":[{"message":message}]}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                )?;
+            }
+            Ok(bodies)
+        });
+        Ok((endpoint, worker))
+    }
+    fn skill_request(requester: &str) -> Vec<Message> {
+        vec![Message {
+            id: 1,
+            author: requester.into(),
+            body: "$linux-diagnostics why is wifi down".into(),
+            kind: "human".into(),
+            created_at: String::new(),
+        }]
+    }
+    fn with_skill(mut config: Config) -> Config {
+        config.skills_prompt = "SKILL-METADATA-BLOCK".into();
+        config.skill = Some(ActiveSkill {
+            name: "linux-diagnostics".into(),
+            instructions: "SKILL-INSTRUCTIONS-BLOCK".into(),
+            request: "why is wifi down".into(),
+        });
+        config
+    }
+    fn tool_names(body: &Value) -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|t| t.pointer("/function/name")?.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn finish(task: &Task, approve: bool) -> Result<(usize, String)> {
+        let mut approvals = 0;
+        loop {
+            match task.recv_timeout(Duration::from_secs(10))? {
+                Event::Approval { answer, .. } => {
+                    approvals += 1;
+                    answer.send(approve)?;
+                }
+                Event::Finished(result) => return Ok((approvals, result?)),
+                Event::Cancelled => bail!("cancelled"),
+                _ => {}
+            }
+        }
+    }
+    #[test]
+    fn active_skill_adds_instructions_not_tools_and_denial_still_ends_the_tool_phase() -> Result<()>
+    {
+        let sentinel =
+            std::env::temp_dir().join(format!("bella-skill-deny-{}", std::process::id()));
+        let command = format!("printf ran > '{}'", sentinel.display());
+        let (plain_endpoint, plain) =
+            scripted(vec![json!({"role":"assistant","content":"plain"})])?;
+        let task = start(config(plain_endpoint), skill_request("owner"));
+        finish(&task, false)?;
+        let baseline = tool_names(&plain.join().unwrap()?[0]);
+        let (endpoint, server) = scripted(vec![
+            tool_reply(&command),
+            json!({"role":"assistant","content":null,"tool_calls":[{"id":"two","type":"function","function":{"name":"open_browser","arguments":"{}"}}]}),
+            json!({"role":"assistant","content":"Stopped as asked."}),
+        ])?;
+        let task = start(with_skill(config(endpoint)), skill_request("owner"));
+        let (approvals, reply) = finish(&task, false)?;
+        assert_eq!(
+            approvals, 1,
+            "denial must not reopen approval with a skill active"
+        );
+        assert_eq!(reply, "Stopped as asked.");
+        assert!(!sentinel.exists());
+        let bodies = server.join().unwrap()?;
+        assert_eq!(tool_names(&bodies[0]), baseline);
+        assert_eq!(baseline, ["shell", "open_browser"]);
+        let messages = bodies[0]["messages"].as_array().unwrap();
+        let system: Vec<_> = messages
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert!(system.contains(&"SKILL-METADATA-BLOCK"));
+        assert!(system.contains(&"SKILL-INSTRUCTIONS-BLOCK"));
+        assert_eq!(
+            messages.last().unwrap()["content"],
+            "owner: why is wifi down"
+        );
+        assert!(!bodies[0].to_string().contains("$linux-diagnostics"));
+        for body in &bodies[1..] {
+            assert!(body.get("tools").is_none(), "tools offered after denial");
+        }
+        let last = bodies[2]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert!(blocked_reason(&last["content"], OWNER_DENIED));
+        Ok(())
+    }
+    #[test]
+    fn guest_requests_never_see_skills_even_if_set() -> Result<()> {
+        let home = std::env::temp_dir().join(format!("bella-skill-guest-{}", std::process::id()));
+        std::fs::create_dir_all(&home)?;
+        // Guest shell (tools on, guest set) and chat-only delegation (tools off).
+        let (endpoint, server) = scripted(vec![json!({"role":"assistant","content":"hi"})])?;
+        let mut cfg = with_skill(guest_cfg(endpoint, home.clone(), "bob"));
+        cfg.requester = "bob".into();
+        finish(&start(cfg, skill_request("bob")), false)?;
+        let body = server.join().unwrap()?.remove(0).to_string();
+        assert!(!body.contains("SKILL-METADATA-BLOCK"));
+        assert!(!body.contains("SKILL-INSTRUCTIONS-BLOCK"));
+        assert!(body.contains("bob: $linux-diagnostics why is wifi down"));
+        let (endpoint, server) = scripted(vec![json!({"role":"assistant","content":"hi"})])?;
+        let mut cfg = with_skill(config(endpoint));
+        cfg.tools = false;
+        cfg.requester = "bob".into();
+        finish(&start(cfg, skill_request("bob")), false)?;
+        let body = server.join().unwrap()?.remove(0).to_string();
+        assert!(!body.contains("SKILL-") && body.contains("$linux-diagnostics"));
+        std::fs::remove_dir_all(home)?;
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires the local model on port 8080; denies every proposed command, executes nothing"]
+    fn live_linux_diagnostics_skill_proposes_a_read_only_check() -> Result<()> {
+        use bella::skills;
+        let data = std::env::temp_dir().join(format!("bella-live-skill-{}", std::process::id()));
+        skills::install_bundled(&skills::bundled_dir(&data))?;
+        let catalog = skills::discover(
+            &skills::default_roots(&data, &data.join("ws")),
+            &[],
+            &skills::Limits::default(),
+        );
+        let loaded = catalog.load("linux-diagnostics", &skills::Limits::default())?;
+        let mut cfg = config("http://127.0.0.1:8080/v1".into());
+        cfg.model = "Qwen3.6-35B-A3B-UD-Q4_K_XL".into();
+        cfg.skills_prompt = skills::prompt_block(&catalog.skills, 2500);
+        cfg.skill = Some(ActiveSkill {
+            name: "linux-diagnostics".into(),
+            instructions: loaded.prompt_block(),
+            request: "is the sshd service running?".into(),
+        });
+        let history = vec![Message {
+            id: 1,
+            author: "owner".into(),
+            body: "$linux-diagnostics is the sshd service running?".into(),
+            kind: "human".into(),
+            created_at: String::new(),
+        }];
+        let task = start(cfg, history);
+        let mut proposed = vec![];
+        let reply = loop {
+            match task.recv_timeout(Duration::from_secs(240))? {
+                Event::Approval {
+                    command, answer, ..
+                } => {
+                    proposed.push(command);
+                    answer.send(false)?;
+                }
+                Event::Finished(result) => break result?,
+                Event::Cancelled => bail!("cancelled"),
+                _ => {}
+            }
+        };
+        eprintln!("proposed: {proposed:?}\nreply: {reply}");
+        let _ = std::fs::remove_dir_all(data);
+        assert_eq!(proposed.len(), 1, "denial must stop further proposals");
+        assert!(
+            !proposed[0].contains("install") && !proposed[0].contains("upgrade"),
+            "{proposed:?}"
+        );
         Ok(())
     }
 }

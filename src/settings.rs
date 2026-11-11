@@ -28,6 +28,10 @@ pub struct Settings {
     pub endpoint: String,
     pub model: String,
     pub workspace: PathBuf,
+    /// Skill names switched off for this device (see docs/SKILLS.md). Optional in
+    /// settings.json so older files load unchanged; omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_skills: Vec<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -39,6 +43,7 @@ impl Default for Settings {
             endpoint: DEFAULT_ENDPOINT.into(),
             model: DEFAULT_MODEL.into(),
             workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            disabled_skills: Vec::new(),
         }
     }
 }
@@ -134,6 +139,8 @@ const HINTS: [&str; 4] = [
 ];
 struct SetupForm {
     fields: [Editor; 4],
+    /// Not editable in setup; carried through so re-running setup keeps it.
+    disabled_skills: Vec<String>,
     selected: usize,
     error: String,
 }
@@ -158,6 +165,7 @@ impl SetupForm {
                 Editor::new(initial.model),
                 Editor::new(initial.workspace.to_string_lossy().into_owned()),
             ],
+            disabled_skills: initial.disabled_skills,
             selected: 0,
             error: String::new(),
         }
@@ -240,6 +248,7 @@ impl SetupForm {
             endpoint: self.fields[1].text.clone(),
             model: self.fields[2].text.clone(),
             workspace: self.fields[3].text.clone().into(),
+            disabled_skills: self.disabled_skills.clone(),
         };
         match settings.validate().and_then(|()| settings.save(path)) {
             Ok(()) => Some(settings),
@@ -501,6 +510,7 @@ mod tests {
             endpoint: DEFAULT_ENDPOINT.into(),
             model: DEFAULT_MODEL.into(),
             workspace: std::env::temp_dir(),
+            disabled_skills: Vec::new(),
         }
     }
     #[test]
@@ -658,6 +668,38 @@ mod tests {
         assert!(!valid_name(&"界".repeat(33)));
         s.endpoint = "file:///tmp/model".into();
         assert!(s.validate().is_err());
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+    #[test]
+    fn disabled_skills_are_optional_and_survive_setup() -> Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("bella-settings-skills-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("settings.json");
+        // A settings.json written before skills existed still loads.
+        std::fs::write(
+            &path,
+            serde_json::json!({"name":"alice","endpoint":DEFAULT_ENDPOINT,"model":"m","workspace":dir}).to_string(),
+        )?;
+        let old = Settings::load(&path)?.unwrap();
+        assert!(old.disabled_skills.is_empty());
+        // Empty lists are not written, so older binaries can still read the file.
+        old.save(&path)?;
+        assert!(!std::fs::read_to_string(&path)?.contains("disabled_skills"));
+        let mut s = old;
+        s.disabled_skills = vec!["browser-check".into()];
+        s.save(&path)?;
+        assert_eq!(
+            Settings::load(&path)?.unwrap().disabled_skills,
+            ["browser-check"]
+        );
+        let mut form = SetupForm::new(s);
+        assert_eq!(form.save(&path).unwrap().disabled_skills, ["browser-check"]);
+        assert_eq!(
+            Settings::load(&path)?.unwrap().disabled_skills,
+            ["browser-check"]
+        );
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }

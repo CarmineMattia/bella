@@ -13,6 +13,7 @@ mod tasks;
 mod ui;
 
 use anyhow::{Result, bail};
+use bella::skills;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use crossterm::{
     event::{
@@ -29,6 +30,10 @@ use std::{
     time::{Duration, Instant},
 };
 use store::{Conversation, Message, Store};
+
+/// Characters of skill metadata in the owner's system prompt. Conservative so a
+/// small local model keeps most of its context for the conversation.
+const SKILLS_PROMPT_BUDGET: usize = 2500;
 
 #[derive(Parser)]
 #[command(
@@ -103,6 +108,8 @@ struct Job {
     events: mpsc::Receiver<agent::Event>,
     /// Set for a delegated (guest) request: the account that mentioned the bot.
     requester: Option<String>,
+    /// Skill selected with `$name` for this owner request, shown while it runs.
+    skill: Option<String>,
 }
 #[derive(PartialEq)]
 enum Dialog {
@@ -120,6 +127,7 @@ enum Dialog {
     Profile,
     Bots,
     BotProfile,
+    Skills,
 }
 struct App {
     recipient: Option<String>,
@@ -153,6 +161,12 @@ struct App {
     config: agent::Config,
     /// Directory containing the database; guest folders are created under `guests/`.
     data_dir: PathBuf,
+    skills: skills::Catalog,
+    skill_roots: Vec<skills::Root>,
+    disabled_skills: Vec<String>,
+    /// settings.json used to persist `/skills disable|enable`; None in tests.
+    settings_path: Option<PathBuf>,
+    skills_error: String,
     dialog: Option<Dialog>,
     query: Editor,
     selected: usize,
@@ -311,6 +325,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     profile.validate()?;
+    let disabled_skills = std::mem::take(&mut profile.disabled_skills);
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         bail!(
             "Chat needs an interactive terminal. Use --send, --history, --doctor or --backup for headless access."
@@ -330,11 +345,14 @@ fn main() -> Result<()> {
             guest: None,
             request_id: String::new(),
             requester: String::new(),
+            skills_prompt: String::new(),
+            skill: None,
         },
     )?;
     if let Some(parent) = args.data.parent().filter(|p| !p.as_os_str().is_empty()) {
         app.data_dir = parent.to_path_buf();
     }
+    app.init_skills(disabled_skills, Some(config_path.clone()));
     if let Some(c) = credentials {
         app.network = Some(network::Connection::start(c, args.data));
     }
@@ -491,6 +509,11 @@ impl App {
             store,
             config,
             data_dir: PathBuf::from("."),
+            skills: skills::Catalog::default(),
+            skill_roots: Vec::new(),
+            disabled_skills: Vec::new(),
+            settings_path: None,
+            skills_error: String::new(),
             dialog: None,
             query: Editor::default(),
             selected: 0,
@@ -1392,6 +1415,7 @@ impl App {
                     | Dialog::BrowserDetails
                     | Dialog::Participants
                     | Dialog::Network
+                    | Dialog::Skills
             )
         ) {
             match m.kind {
@@ -1498,6 +1522,7 @@ impl App {
                     | Dialog::Participants
                     | Dialog::Network
                     | Dialog::BrowserDetails
+                    | Dialog::Skills
             )
         ) {
             match k.code {
@@ -1519,6 +1544,10 @@ impl App {
                 }
                 KeyCode::Char('r') if self.dialog == Some(Dialog::ModelInfo) => {
                     self.recheck_model()
+                }
+                KeyCode::Char('r') if self.dialog == Some(Dialog::Skills) => {
+                    self.rescan_skills();
+                    self.status = "Skill roots scanned again".into();
                 }
                 KeyCode::Esc | KeyCode::Enter => self.dialog = None,
                 _ => {}
@@ -1664,6 +1693,14 @@ impl App {
             self.open_dialog(Dialog::BrowserDetails);
             return Ok(());
         }
+        if text == "/skills" {
+            self.rescan_skills();
+            self.open_dialog(Dialog::Skills);
+            return Ok(());
+        }
+        if let Some(rest) = text.strip_prefix("/skills ") {
+            return self.skills_command(rest.trim());
+        }
         if text == "/network" {
             self.open_dialog(Dialog::Network);
             return Ok(());
@@ -1737,6 +1774,16 @@ impl App {
             self.status = "Your agent is busy; your draft is kept here".into();
             return Ok(());
         }
+        // A leading `$name` addressed to your agent must name an enabled skill; never
+        // send it as if the skill were active.
+        if invoke && let Some((_, selection)) = skill_selection(text) {
+            self.rescan_skills();
+            if let Err(error) = self.skills.resolve(selection.name) {
+                self.input = Editor::new(text.into());
+                self.status = format!("{error} · /skills lists skills; your draft is kept");
+                return Ok(());
+            }
+        }
         self.latest()?;
         let routed = if explicit.is_none()
             && let Some(handle) = &handle
@@ -1776,6 +1823,137 @@ impl App {
         self.refresh()?;
         Ok(())
     }
+    /// Installs the bundled skills into the data directory and discovers all roots.
+    fn init_skills(&mut self, disabled: Vec<String>, settings_path: Option<PathBuf>) {
+        self.skills_error = skills::install_bundled(&skills::bundled_dir(&self.data_dir))
+            .err()
+            .map(|e| format!("Bundled skills could not be installed: {e}"))
+            .unwrap_or_default();
+        self.skill_roots = skills::default_roots(&self.data_dir, &self.config.workspace);
+        self.disabled_skills = disabled;
+        self.settings_path = settings_path;
+        self.rescan_skills();
+    }
+    /// Discovery is bounded and cheap, so it runs again before each owner request
+    /// and when /skills opens; edits on disk apply without a restart.
+    fn rescan_skills(&mut self) {
+        self.skills = skills::discover(
+            &self.skill_roots,
+            &self.disabled_skills,
+            &skills::Limits::default(),
+        );
+    }
+    fn skills_command(&mut self, args: &str) -> Result<()> {
+        let (verb, name) = args.split_once(' ').unwrap_or((args, ""));
+        let name = name.trim().trim_start_matches('$');
+        let disable = match verb {
+            "disable" => true,
+            "enable" => false,
+            _ => {
+                self.status = "Use /skills, /skills disable NAME or /skills enable NAME".into();
+                return Ok(());
+            }
+        };
+        if skills::validate_name(name, skills::Limits::default().max_name_chars).is_err() {
+            self.status = "Name a skill: lowercase letters, digits and '-'".into();
+            return Ok(());
+        }
+        let mut list = self.disabled_skills.clone();
+        list.retain(|n| n != name);
+        if disable {
+            list.push(name.to_owned());
+            list.sort();
+        }
+        // Persist into the existing settings.json only; CLI overrides are never written.
+        let mut saved = false;
+        if let Some(path) = &self.settings_path
+            && let Some(mut current) = settings::Settings::load(path)?
+        {
+            current.disabled_skills = list.clone();
+            current.save(path)?;
+            saved = true;
+        }
+        self.disabled_skills = list;
+        self.rescan_skills();
+        let known =
+            self.skills.get(name).is_some() || self.skills.disabled.iter().any(|m| m.name == name);
+        self.status = format!(
+            "Skill {name} {}{}{}",
+            if disable { "disabled" } else { "enabled" },
+            if known {
+                ""
+            } else {
+                " · not found in any root yet"
+            },
+            if saved {
+                ""
+            } else {
+                " · this session only (no settings.json)"
+            }
+        );
+        Ok(())
+    }
+    /// Plain-text body of the /skills window.
+    fn skills_report(&self) -> String {
+        let mut out = String::from(
+            "Skills are instructions only. They add no tools or permissions; every action still needs your approval. Start a request to your agent with $name to use one. Guests of lent bots never get skills.\n\nRoots (highest priority first)\n",
+        );
+        for root in &self.skills.roots {
+            let status = match &root.status {
+                skills::RootStatus::Missing => "not created".to_owned(),
+                skills::RootStatus::Unusable => "unusable".to_owned(),
+                skills::RootStatus::Scanned { entries } => format!("{entries} entries"),
+            };
+            out.push_str(&format!(
+                "  {} · {} · {status}\n",
+                root.label,
+                root.path.display()
+            ));
+        }
+        let list = |out: &mut String, title: &str, items: &[skills::SkillMeta]| {
+            out.push_str(&format!("\n{title} ({})\n", items.len()));
+            if items.is_empty() {
+                out.push_str("  none\n");
+            }
+            for m in items {
+                out.push_str(&format!(
+                    "  ${} · {}{}\n    {}\n",
+                    m.name,
+                    m.root,
+                    m.version().map(|v| format!(" · v{v}")).unwrap_or_default(),
+                    m.description
+                ));
+            }
+        };
+        list(&mut out, "Enabled", &self.skills.skills);
+        list(&mut out, "Disabled", &self.skills.disabled);
+        out.push_str(&format!(
+            "\nDiagnostics ({})\n",
+            self.skills.diagnostics.len()
+        ));
+        if !self.skills_error.is_empty() {
+            out.push_str(&format!("  {}\n", self.skills_error));
+        }
+        if self.skills.diagnostics.is_empty() && self.skills_error.is_empty() {
+            out.push_str("  none\n");
+        }
+        for d in &self.skills.diagnostics {
+            out.push_str(&format!(
+                "  {}{}: {}\n",
+                d.root
+                    .as_deref()
+                    .map(|r| format!("{r} · "))
+                    .unwrap_or_default(),
+                d.path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "settings".into()),
+                d.kind
+            ));
+        }
+        out.push_str("\n/skills disable NAME · /skills enable NAME (saved in settings.json)");
+        safe(&out)
+    }
     fn start_agent(&mut self) -> Result<()> {
         let history = self.store.history(&self.room)?;
         let request = history
@@ -1797,6 +1975,39 @@ impl App {
         config.instructions = bot.instructions.clone();
         if !bot.model.is_empty() {
             config.model = bot.model.clone();
+        }
+        self.rescan_skills();
+        config.skills_prompt = skills::prompt_block(&self.skills.skills, SKILLS_PROMPT_BUDGET);
+        config.skill = None;
+        let mut skill_note = None;
+        if let Some((prefix, selection)) = skill_selection(request) {
+            match self.skills.load(selection.name, &skills::Limits::default()) {
+                Ok(loaded) => {
+                    let rest = if selection.rest.is_empty() {
+                        "Use this skill."
+                    } else {
+                        selection.rest
+                    };
+                    skill_note = Some(format!(
+                        "Skill {} · {} · instructions only; tools and approvals unchanged",
+                        loaded.meta.name, loaded.meta.root
+                    ));
+                    config.skill = Some(agent::ActiveSkill {
+                        name: loaded.meta.name.clone(),
+                        instructions: loaded.prompt_block(),
+                        request: format!("{prefix}{rest}"),
+                    });
+                }
+                Err(error) => {
+                    self.failed_room = Some(self.room.clone());
+                    self.status = format!("Skill not used: {error} · /skills shows details");
+                    return Ok(());
+                }
+            }
+        }
+        let skill = config.skill.as_ref().map(|s| s.name.clone());
+        if let Some(note) = skill_note {
+            self.store.add(&self.room, "tools", &note, "tool")?;
         }
         let tx = self.store.connection().unchecked_transaction()?;
         let id = tasks::begin(&tx, &self.name, &self.room, &self.session, request)?;
@@ -1822,9 +2033,13 @@ impl App {
             room: self.room.clone(),
             events: task.events,
             requester: None,
+            skill: skill.clone(),
         });
         self.failed_room = None;
-        self.status = "Your agent is thinking…".into();
+        self.status = match skill {
+            Some(name) => format!("Your agent is thinking… · skill {name}"),
+            None => "Your agent is thinking…".into(),
+        };
         Ok(())
     }
     /// Owner side of bot lending: answer new mentions of this account's lent bots that other
@@ -1942,6 +2157,9 @@ impl App {
         config.instructions = bot.instructions.clone();
         config.guest = None;
         config.tools = false;
+        // Skills are owner-only in this version: guests never get metadata or instructions.
+        config.skills_prompt = String::new();
+        config.skill = None;
         if bot.guest_tools.shell() {
             let home = paths::prepare_guest_home(&self.data_dir, requester)?;
             config.tools = true;
@@ -1978,6 +2196,7 @@ impl App {
             room: room.into(),
             events: task.events,
             requester: Some(requester.into()),
+            skill: None,
         });
         self.status = if bot.guest_tools.shell() {
             format!(
@@ -2227,6 +2446,19 @@ fn record_end(
     Ok(())
 }
 
+/// Explicit skill selection in an agent request: `$name …`, optionally after a
+/// leading `@handle`. Returns that `@handle ` prefix and the parsed selection.
+fn skill_selection(text: &str) -> Option<(String, skills::Selection<'_>)> {
+    let text = text.trim_start();
+    let (prefix, body) = match text.strip_prefix('@') {
+        Some(after) => {
+            let end = after.find(char::is_whitespace)?;
+            (format!("@{} ", &after[..end]), &after[end..])
+        }
+        None => (String::new(), text),
+    };
+    Some((prefix, skills::parse_selection(body)?))
+}
 fn chat_name(room: &str) -> String {
     if room.starts_with("agent:") {
         "My agent".into()
