@@ -8,7 +8,6 @@ mod profile_ui;
 mod profiles;
 mod recipient;
 mod settings;
-mod skills;
 mod store;
 mod tasks;
 mod ui;
