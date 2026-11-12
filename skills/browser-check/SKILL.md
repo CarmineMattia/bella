@@ -6,6 +6,21 @@ version: 1
 # Browser check
 
 - `open_browser` only asks the desktop launcher to open a page. It does not load, read, see or control the page, and it does not verify the page appeared.
+
+## When to use
+
+- "Open https://example.com" or "open this link in the browser"
+- "Did the browser launch succeed?" after an approved `open_browser` action
+
+## When not to use
+
+- Reading, summarizing or checking what the page shows: `open_browser` only opens, it does not read pages
+- Clicking, typing, scrolling or taking screenshots in the browser
+- Linux service, package, disk or network status: use `linux-diagnostics`
+- An app crash or core dump: use `crash-investigation`
+
+## How to work
+
 - After an approved launch, say you asked the browser to open the address, and report the tool result exactly: launcher accepted, failed or denied. Never say the page is open, loaded or showing something.
 - You cannot click, type, scroll, read text or take screenshots in the browser. If the owner needs that, say so and ask them to look at the screen and tell you what they see.
 - To check whether a site responds, you may propose a read-only shell command such as `curl -sI URL`. It also needs approval, and it checks the server, not the browser window.

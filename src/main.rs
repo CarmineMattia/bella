@@ -1917,10 +1917,12 @@ impl App {
             }
             for m in items {
                 out.push_str(&format!(
-                    "  ${} · {}{}\n    {}\n",
+                    "  ${} · {}{} · {}\n    {}\n    {}\n",
                     m.name,
                     m.root,
                     m.version().map(|v| format!(" · v{v}")).unwrap_or_default(),
+                    m.content_hash,
+                    m.path.display(),
                     m.description
                 ));
             }

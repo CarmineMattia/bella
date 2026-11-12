@@ -242,7 +242,12 @@ class Alpha(unittest.TestCase):
         model=self.model('complete'); terminal=self.app(model=model)
         self.assertTrue((self.root/'bundled-skills'/'linux-diagnostics'/'SKILL.md').is_file())
         terminal.send('/skills\r'); terminal.wait_text('R Rescan')
-        terminal.wait_text('$browser-check'); terminal.wait_text('$linux-diagnostics')
+        terminal.wait_text('$browser-check'); terminal.wait_text('$crash-investigation')
+        for _ in range(8):
+            if '$linux-diagnostics' in terminal.screen():
+                break
+            terminal.send('\x1b[6~')
+        terminal.wait_text('$linux-diagnostics')
         terminal.send('\x1b'); terminal.send('@bot $no-such-skill check\r')
         terminal.wait_text('no skill named')
         terminal.send('\x15'); terminal.send('/skills disable browser-check\r')

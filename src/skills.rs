@@ -1,13 +1,14 @@
 //! Standalone `SKILL.md` loader (harness roadmap P4).
 //!
-//! This module is deliberately inert: it is not wired into the agent yet.
-//! It discovers skills from configured roots, reads only their front matter
+//! Discovers skills from configured roots, reads only their front matter
 //! up front, and reads full instructions only when one skill is selected.
 //!
 //! Skills are text. They never create tools or permissions, and the loader
-//! never executes, downloads or installs anything. Files next to a
-//! `SKILL.md` (scripts, references) are only listed, never read or run.
-//! See `docs/SKILLS.md`.
+//! never executes, downloads or installs anything. Scripts next to a
+//! `SKILL.md` are listed and marked unreviewed, never run. Local files
+//! referenced by a skill are checked for existence and containment; a
+//! missing or escaping path is a warning and the skill still loads. See
+//! `docs/SKILLS.md`.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -55,6 +56,10 @@ pub const BUNDLED: &[(&str, &str)] = &[
         include_str!("../skills/browser-check/SKILL.md"),
     ),
     (
+        "crash-investigation",
+        include_str!("../skills/crash-investigation/SKILL.md"),
+    ),
+    (
         "linux-diagnostics",
         include_str!("../skills/linux-diagnostics/SKILL.md"),
     ),
@@ -98,6 +103,10 @@ pub struct Limits {
     pub max_extra_keys: usize,
     /// Resource paths listed when a skill is loaded.
     pub max_resources: usize,
+    /// How many hops of referenced markdown to scan, counting `SKILL.md` as 1.
+    pub max_ref_depth: usize,
+    /// Maximum distinct local references checked per skill.
+    pub max_refs: usize,
 }
 
 impl Default for Limits {
@@ -112,6 +121,8 @@ impl Default for Limits {
             max_instructions_bytes: 32 * 1024,
             max_extra_keys: 16,
             max_resources: 64,
+            max_ref_depth: 3,
+            max_refs: 32,
         }
     }
 }
@@ -132,6 +143,9 @@ pub struct SkillMeta {
     /// Other simple `key: value` front matter fields, e.g. `version`.
     /// Informational only: `allowed-tools` or similar grant nothing.
     pub extra: BTreeMap<String, String>,
+    /// First 12 hex digits of a stable FNV-1a hash of the `SKILL.md` bytes.
+    /// For inspection only; not an integrity or security check.
+    pub content_hash: String,
 }
 
 impl SkillMeta {
@@ -164,6 +178,10 @@ pub enum DiagnosticKind {
     TooManySkills { limit: usize },
     DisabledNotFound { name: String },
     ChangedOnDisk,
+    MissingResource { path: PathBuf },
+    ResourceEscapes { path: PathBuf },
+    ResourceTraversalLimit { limit: usize },
+    UnreviewedScript { path: PathBuf },
 }
 
 impl fmt::Display for DiagnosticKind {
@@ -204,6 +222,25 @@ impl fmt::Display for DiagnosticKind {
             TooManySkills { limit } => write!(f, "skill limit {limit} reached; skipped"),
             DisabledNotFound { name } => write!(f, "disabled skill {name:?} was not found"),
             ChangedOnDisk => write!(f, "skill changed on disk since discovery; rediscover"),
+            MissingResource { path } => {
+                write!(f, "referenced file {} is missing", path.display())
+            }
+            ResourceEscapes { path } => write!(
+                f,
+                "referenced path {} escapes the skill directory",
+                path.display()
+            ),
+            ResourceTraversalLimit { limit } => {
+                write!(
+                    f,
+                    "resource reference traversal reached the limit of {limit}"
+                )
+            }
+            UnreviewedScript { path } => write!(
+                f,
+                "script {} is unreviewed; running it still needs ordinary shell approval",
+                path.display()
+            ),
         }
     }
 }
@@ -270,6 +307,9 @@ pub struct LoadedSkill {
     /// Resources skipped because they resolve outside the root or exceed
     /// `max_resources`.
     pub skipped_resources: usize,
+    /// Warnings that do not prevent the skill from loading (missing or
+    /// escaping references, unreviewed scripts, traversal limits).
+    pub warnings: Vec<DiagnosticKind>,
 }
 
 impl LoadedSkill {
@@ -401,8 +441,10 @@ pub fn discover(roots: &[Root], disabled: &[String], limits: &Limits) -> Catalog
                         };
                         cat.diagnostics.push(diag(Some(meta.path), kind));
                     } else {
+                        let warns = skill_warnings(&meta, limits);
                         seen.insert(meta.name.clone(), accepted.len());
                         accepted.push(meta);
+                        cat.diagnostics.extend(warns);
                     }
                 }
             }
@@ -560,6 +602,7 @@ fn read_meta(
             dir: dir_name,
         });
     }
+    let content_hash = content_hash(&read_file_bytes(&path, limits)?);
     Ok(SkillMeta {
         name: parsed.name,
         description: parsed.description,
@@ -568,6 +611,7 @@ fn read_meta(
         root_path: canon_root.to_path_buf(),
         path,
         extra: parsed.extra,
+        content_hash,
     })
 }
 
@@ -755,11 +799,16 @@ fn load_meta(meta: SkillMeta, limits: &Limits) -> Result<LoadedSkill, Diagnostic
         });
     }
     let (resources, skipped_resources) = list_resources(&meta, limits);
+    let warnings = skill_warnings(&meta, limits)
+        .into_iter()
+        .map(|d| d.kind)
+        .collect();
     Ok(LoadedSkill {
         meta,
         instructions,
         resources,
         skipped_resources,
+        warnings,
     })
 }
 
@@ -802,6 +851,270 @@ fn list_resources(meta: &SkillMeta, limits: &Limits) -> (Vec<PathBuf>, usize) {
     }
     out.sort();
     (out, skipped)
+}
+
+/// First 12 lowercase hex digits of a 64-bit FNV-1a hash of `bytes`.
+/// Stable across runs and platforms. Not cryptographic.
+pub fn content_hash(bytes: &[u8]) -> String {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut h = OFFSET;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(PRIME);
+    }
+    format!("{h:016x}")[..12].to_string()
+}
+
+fn read_file_bytes(path: &Path, limits: &Limits) -> Result<Vec<u8>, DiagnosticKind> {
+    let f = open_bounded(path, limits)?;
+    let mut bytes = Vec::new();
+    f.take(limits.max_file_bytes)
+        .read_to_end(&mut bytes)
+        .map_err(|e| DiagnosticKind::Io(e.to_string()))?;
+    Ok(bytes)
+}
+
+fn is_script_resource(rel: &Path) -> bool {
+    rel.components()
+        .next()
+        .is_some_and(|c| c.as_os_str() == "scripts")
+        || rel.extension().is_some_and(|e| e == "sh" || e == "bash")
+}
+
+fn is_markdown(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+}
+
+/// Warnings that do not prevent a skill from being listed or loaded.
+fn skill_warnings(meta: &SkillMeta, limits: &Limits) -> Vec<Diagnostic> {
+    let diag = |kind| Diagnostic {
+        root: Some(meta.root.clone()),
+        path: Some(meta.path.clone()),
+        kind,
+    };
+    let mut out = Vec::new();
+    let (resources, _) = list_resources(meta, limits);
+    for rel in &resources {
+        if is_script_resource(rel) {
+            out.push(diag(DiagnosticKind::UnreviewedScript { path: rel.clone() }));
+        }
+    }
+    out.extend(reference_warnings(meta, limits).into_iter().map(diag));
+    out
+}
+
+fn reference_warnings(meta: &SkillMeta, limits: &Limits) -> Vec<DiagnosticKind> {
+    let Ok(bytes) = read_file_bytes(&meta.path, limits) else {
+        return Vec::new();
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Vec::new();
+    };
+    let text = text.trim_start_matches('\u{feff}');
+    let instructions = instructions_from_skill_text(text).unwrap_or("");
+    check_references(meta.dir(), instructions, limits)
+}
+
+fn instructions_from_skill_text(text: &str) -> Option<&str> {
+    let mut lines = text.split_inclusive('\n');
+    if lines.next().map(str::trim_end) != Some("---") {
+        return None;
+    }
+    let mut pos = text.find('\n').map_or(text.len(), |i| i + 1);
+    for l in lines {
+        pos += l.len();
+        if l.trim_end() == "---" {
+            return Some(text[pos..].trim());
+        }
+    }
+    None
+}
+
+fn check_references(skill_dir: &Path, instructions: &str, limits: &Limits) -> Vec<DiagnosticKind> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut queue = vec![(instructions.to_string(), 1_usize)];
+    let mut checked = 0usize;
+    let mut hit_limit = false;
+    while let Some((text, depth)) = queue.pop() {
+        for rel in extract_local_refs(&text) {
+            if !seen.insert(rel.clone()) {
+                continue;
+            }
+            checked += 1;
+            if checked > limits.max_refs {
+                hit_limit = true;
+                break;
+            }
+            match resolve_local_ref(skill_dir, &rel) {
+                Err(kind) => out.push(kind),
+                Ok(abs) => {
+                    if depth < limits.max_ref_depth
+                        && is_markdown(&abs)
+                        && let Ok(bytes) = read_file_bytes(&abs, limits)
+                        && let Ok(next) = String::from_utf8(bytes)
+                    {
+                        queue.push((next, depth + 1));
+                    }
+                }
+            }
+        }
+        if hit_limit {
+            break;
+        }
+    }
+    if hit_limit {
+        out.push(DiagnosticKind::ResourceTraversalLimit {
+            limit: limits.max_refs,
+        });
+    }
+    out
+}
+
+fn resolve_local_ref(skill_dir: &Path, rel: &str) -> Result<PathBuf, DiagnosticKind> {
+    let path = PathBuf::from(rel);
+    let Some(joined) = lexical_join(skill_dir, rel) else {
+        return Err(DiagnosticKind::ResourceEscapes { path });
+    };
+    if !joined.exists() {
+        return Err(DiagnosticKind::MissingResource { path });
+    }
+    match fs::canonicalize(&joined) {
+        Ok(c) if c.starts_with(skill_dir) => Ok(c),
+        Ok(_) => Err(DiagnosticKind::ResourceEscapes { path }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(DiagnosticKind::MissingResource { path })
+        }
+        Err(e) => Err(DiagnosticKind::Io(e.to_string())),
+    }
+}
+
+fn lexical_join(base: &Path, rel: &str) -> Option<PathBuf> {
+    let p = Path::new(rel);
+    if p.is_absolute() {
+        return None;
+    }
+    let mut acc = base.to_path_buf();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => return None,
+            std::path::Component::ParentDir => {
+                if acc == base || !acc.starts_with(base) || !acc.pop() {
+                    return None;
+                }
+            }
+            std::path::Component::Normal(s) => acc.push(s),
+        }
+    }
+    acc.starts_with(base).then_some(acc)
+}
+
+fn extract_local_refs(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    extract_markdown_links(text, &mut out);
+    extract_prefixed_paths(text, &mut out);
+    out
+}
+
+fn push_unique(out: &mut Vec<String>, p: String) {
+    if !out.contains(&p) {
+        out.push(p);
+    }
+}
+
+fn extract_markdown_links(text: &str, out: &mut Vec<String>) {
+    let mut rest = text;
+    while let Some(i) = rest.find("](") {
+        let after = &rest[i + 2..];
+        let Some(end) = after.find(')') else {
+            break;
+        };
+        let target = strip_link_dest(&after[..end]);
+        if let Some(p) = local_ref(target) {
+            push_unique(out, p);
+        }
+        rest = &after[end + 1..];
+    }
+}
+
+fn strip_link_dest(raw: &str) -> &str {
+    let raw = raw.trim();
+    let raw = raw
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(raw)
+        .trim();
+    match raw.find(['"', '\'']) {
+        Some(i) => raw[..i].trim(),
+        None => raw,
+    }
+}
+
+fn local_ref(target: &str) -> Option<String> {
+    let t = target.trim();
+    if t.is_empty() || t.starts_with('#') || looks_like_scheme(t) {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+fn looks_like_scheme(t: &str) -> bool {
+    let Some((scheme, rest)) = t.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == '+' || c == '.' || c == '-')
+        && (rest.starts_with("//")
+            || scheme.eq_ignore_ascii_case("mailto")
+            || scheme.eq_ignore_ascii_case("data"))
+}
+
+fn extract_prefixed_paths(text: &str, out: &mut Vec<String>) {
+    const PREFIXES: &[&str] = &["references/", "scripts/", "./", "../"];
+    let mut i = 0;
+    while i < text.len() {
+        if !text.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        let rest = &text[i..];
+        if PREFIXES.iter().copied().any(|p| rest.starts_with(p)) {
+            let ok_start = i == 0 || !is_path_byte(text.as_bytes()[i - 1]);
+            if ok_start {
+                let path = take_path(rest);
+                if let Some(p) = local_ref(path) {
+                    push_unique(out, p);
+                }
+                i += path.len().max(1);
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+fn is_path_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'/' | b'-' | b'_' | b'~')
+}
+
+fn is_path_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '-' | '_' | '~')
+}
+
+fn take_path(s: &str) -> &str {
+    let end = s.find(|c: char| !is_path_char(c)).unwrap_or(s.len());
+    s[..end].trim_end_matches(|c: char| {
+        matches!(
+            c,
+            '.' | ',' | ';' | ':' | ')' | ']' | '!' | '?' | '"' | '\''
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1131,6 +1444,14 @@ mod tests {
             s.meta.extra.get("allowed-tools").unwrap(),
             "open_browser shell"
         );
+        assert!(has(&cat, |k| matches!(
+            k,
+            DiagnosticKind::UnreviewedScript { path } if path == Path::new("scripts/verify.sh")
+        )));
+        assert!(s.warnings.iter().any(|k| matches!(
+            k,
+            DiagnosticKind::UnreviewedScript { path } if path == Path::new("scripts/verify.sh")
+        )));
         // The fixture script would create this file if anything ran it.
         assert!(!std::env::temp_dir().join("bella-skill-script-ran").exists());
     }
@@ -1161,15 +1482,23 @@ mod tests {
         let cat = discover(&default_roots(&data, &ws), &[], &l);
         assert!(cat.diagnostics.is_empty(), "{:#?}", cat.diagnostics);
         let names: Vec<_> = cat.skills.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, ["browser-check", "linux-diagnostics"]);
+        assert_eq!(
+            names,
+            ["browser-check", "crash-investigation", "linux-diagnostics"]
+        );
         assert!(cat.skills.iter().all(|m| m.root == "bundled"));
-        // The metadata of both fits a small-model prompt budget.
+        // The metadata of all three fits a small-model prompt budget.
         assert!(!prompt_block(&cat.skills, 2500).contains("not listed"));
         // Browser skill must not let the model claim page control.
         let b = cat.load("browser-check", &l).unwrap().instructions;
         assert!(b.contains("only asks the desktop launcher to open a page"));
         assert!(b.contains("does not verify the page appeared"));
         assert!(b.contains("Never say the page is open"));
+        assert!(b.contains("When to use") && b.contains("When not to use"));
+        assert!(b.contains("does not read pages"));
+        let linux = cat.load("linux-diagnostics", &l).unwrap().instructions;
+        assert!(linux.contains("When to use") && linux.contains("When not to use"));
+        assert!(linux.contains("crash-investigation"));
         // A user copy overrides the bundled one; reinstall leaves it alone.
         write(
             &data.join("skills"),
@@ -1181,7 +1510,12 @@ mod tests {
             .join(SKILL_FILE);
         fs::write(&edited, "tampered").unwrap();
         install_bundled(&bundled_dir(&data)).unwrap();
-        assert_eq!(fs::read_to_string(&edited).unwrap(), BUNDLED[1].1);
+        let shipped = BUNDLED
+            .iter()
+            .find(|(n, _)| *n == "linux-diagnostics")
+            .unwrap()
+            .1;
+        assert_eq!(fs::read_to_string(&edited).unwrap(), shipped);
         let cat = discover(&default_roots(&data, &ws), &[], &l);
         assert_eq!(cat.get("browser-check").unwrap().root, "user");
         assert!(has(&cat, |k| matches!(k, DiagnosticKind::Shadowed { .. })));
@@ -1246,5 +1580,165 @@ mod tests {
         assert_eq!(b.matches("</skill-metadata>").count(), 1);
         assert!(!b.contains("<system>"));
         assert_eq!(b.lines().count(), 4);
+    }
+
+    #[test]
+    fn bundled_crash_investigation_loads() {
+        let t = Tmp::new("bundled-crash");
+        let data = t.0.join("data");
+        let ws = t.0.join("ws");
+        install_bundled(&bundled_dir(&data)).unwrap();
+        let l = Limits::default();
+        let cat = discover(&default_roots(&data, &ws), &[], &l);
+        let s = cat.load("crash-investigation", &l).unwrap();
+        assert_eq!(s.meta.root, "bundled");
+        assert_eq!(s.meta.version(), Some("1"));
+        assert_eq!(s.meta.content_hash.len(), 12);
+        assert!(s.instructions.contains("When to use"));
+        assert!(s.instructions.contains("When not to use"));
+        assert!(s.instructions.contains("journalctl"));
+        assert!(s.instructions.contains("coredumpctl list"));
+        assert!(s.instructions.contains("coredumpctl info"));
+        assert!(s.instructions.contains("dmesg"));
+        assert!(s.instructions.contains("ulimit -c"));
+        assert!(s.instructions.contains("Never use `sudo`"));
+        assert!(s.instructions.contains("Never run destructive commands"));
+        assert!(s.instructions.contains("normal approval"));
+        assert!(s.warnings.is_empty(), "{:#?}", s.warnings);
+    }
+
+    #[test]
+    fn version_and_content_hash_are_exposed() {
+        let t = Tmp::new("hash");
+        let body = "---\nname: hashed\ndescription: d\nversion: 3\n---\nbody\n";
+        write(&t.0, "hashed", body);
+        let cat = discover(&[Root::new("t", &t.0)], &[], &Limits::default());
+        let m = cat.get("hashed").unwrap();
+        assert_eq!(m.version(), Some("3"));
+        assert_eq!(m.root, "t");
+        assert!(m.path.ends_with("hashed/SKILL.md"));
+        assert_eq!(m.content_hash, content_hash(body.as_bytes()));
+        assert_eq!(m.content_hash.len(), 12);
+        assert!(
+            m.content_hash
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+        assert_eq!(content_hash(b"abc"), content_hash(b"abc"));
+        assert_ne!(content_hash(b"abc"), content_hash(b"abd"));
+    }
+
+    #[test]
+    fn missing_resource_is_a_warning_and_skill_still_loads() {
+        let t = Tmp::new("missing-res");
+        write(
+            &t.0,
+            "a",
+            "---\nname: a\ndescription: d\n---\nSee [guide](references/guide.md) and scripts/help.sh\n",
+        );
+        let cat = discover(&[Root::new("t", &t.0)], &[], &Limits::default());
+        assert_eq!(cat.skills.len(), 1);
+        assert!(has(&cat, |k| matches!(
+            k,
+            DiagnosticKind::MissingResource { path } if path == Path::new("references/guide.md")
+        )));
+        assert!(has(&cat, |k| matches!(
+            k,
+            DiagnosticKind::MissingResource { path } if path == Path::new("scripts/help.sh")
+        )));
+        let s = cat.load("a", &Limits::default()).unwrap();
+        assert!(s.instructions.contains("references/guide.md"));
+        assert!(s.warnings.iter().any(|k| matches!(
+            k,
+            DiagnosticKind::MissingResource { path } if path == Path::new("references/guide.md")
+        )));
+    }
+
+    #[test]
+    fn escaping_reference_is_diagnosed_and_skill_still_loads() {
+        let t = Tmp::new("esc-ref");
+        let root = t.0.join("root");
+        write(
+            &root,
+            "a",
+            "---\nname: a\ndescription: d\n---\nSee [x](../outside.md) and [abs](/tmp/x)\n",
+        );
+        fs::write(t.0.join("outside.md"), "nope").unwrap();
+        let cat = discover(&[Root::new("t", &root)], &[], &Limits::default());
+        assert_eq!(cat.skills.len(), 1);
+        let escapes = cat
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d.kind, DiagnosticKind::ResourceEscapes { .. }))
+            .count();
+        assert_eq!(escapes, 2, "{:#?}", cat.diagnostics);
+        assert!(cat.load("a", &Limits::default()).is_ok());
+    }
+
+    #[test]
+    fn resource_reference_traversal_is_bounded() {
+        let t = Tmp::new("trav");
+        let d = t.0.join("a");
+        fs::create_dir_all(d.join("references")).unwrap();
+        fs::write(
+            d.join(SKILL_FILE),
+            "---\nname: a\ndescription: d\n---\n[one](references/one.md)\n",
+        )
+        .unwrap();
+        fs::write(
+            d.join("references/one.md"),
+            "See [two](references/two.md)\n",
+        )
+        .unwrap();
+        fs::write(
+            d.join("references/two.md"),
+            "See [missing](references/gone.md)\n",
+        )
+        .unwrap();
+        let roots = [Root::new("t", &t.0)];
+        let shallow = Limits {
+            max_ref_depth: 2,
+            ..Limits::default()
+        };
+        let cat = discover(&roots, &[], &shallow);
+        assert_eq!(cat.skills.len(), 1);
+        assert!(
+            !has(&cat, |k| matches!(
+                k,
+                DiagnosticKind::MissingResource { .. }
+            )),
+            "depth 2 must not scan two.md for further refs: {:#?}",
+            cat.diagnostics
+        );
+        let deep = Limits {
+            max_ref_depth: 3,
+            ..Limits::default()
+        };
+        let cat = discover(&roots, &[], &deep);
+        assert!(has(&cat, |k| matches!(
+            k,
+            DiagnosticKind::MissingResource { path } if path == Path::new("references/gone.md")
+        )));
+
+        write(
+            &t.0,
+            "b",
+            "---\nname: b\ndescription: d\n---\n[a](references/a.md) [b](references/b.md) [c](references/c.md)\n",
+        );
+        let capped = Limits {
+            max_refs: 2,
+            ..Limits::default()
+        };
+        let cat = discover(&[Root::new("u", &t.0)], &[], &capped);
+        let b = cat.get("b").unwrap();
+        assert!(
+            cat.diagnostics
+                .iter()
+                .any(|d| d.path.as_ref() == Some(&b.path)
+                    && matches!(d.kind, DiagnosticKind::ResourceTraversalLimit { limit: 2 })),
+            "{:#?}",
+            cat.diagnostics
+        );
+        assert!(cat.load("b", &capped).is_ok());
     }
 }

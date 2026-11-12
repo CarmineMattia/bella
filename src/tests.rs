@@ -2238,7 +2238,7 @@ fn unknown_or_disabled_skills_keep_the_draft_and_never_run() -> Result<()> {
     a.submit("/skills".into())?;
     assert!(a.dialog == Some(Dialog::Skills));
     let report = a.skills_report();
-    assert!(report.contains("Enabled (1)") && report.contains("Disabled (1)"));
+    assert!(report.contains("Enabled (2)") && report.contains("Disabled (1)"));
     assert!(report.contains("$linux-diagnostics · bundled · v1"));
     assert!(report.contains("bundled ·") && report.contains("user ·"));
     let mut terminal = Terminal::new(TestBackend::new(120, 40))?;
