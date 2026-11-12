@@ -1,6 +1,6 @@
 # Skills
 
-Status: roadmap item P4, slice 2. Skills are connected to the owner's own agent requests and can only be selected **explicitly** with `$name`. There is no implicit selection yet.
+Status: roadmap item P4, slice 3. Skills are connected to the owner's own agent requests and can only be selected **explicitly** with `$name`. There is no implicit selection yet.
 
 A skill is a directory with a `SKILL.md`. Skills are plain instructions. They never create tools, permissions or approvals. The loader never executes, downloads or installs anything.
 
@@ -31,7 +31,7 @@ Compatibility with any public skill specification (Codex, Agent Skills) is **not
 - Start a request to your agent with `$name`. In `/agent` that is `$linux-diagnostics is sshd running?`; in a group it is `@bot $linux-diagnostics …`, or the same text with Bot selected in the composer. The app loads that skill's instructions for this request only and sends the rest of the message as the request.
 - The chat shows a note, **Skill linux-diagnostics · bundled · instructions only; tools and approvals unchanged**. The header status shows `· skill NAME` while the request runs.
 - If the name matches no enabled skill, nothing is sent and your draft is kept. The status explains why: no skill with that name, or the skill is disabled. A `$` later in the message, or a name that is not a valid skill name such as `$HOME`, selects nothing, and the message goes out as ordinary text.
-- `/skills` opens a window that lists the roots, enabled and disabled skills with their source and version, and the diagnostics. **R** scans again.
+- `/skills` opens a window that lists the roots, enabled and disabled skills with their source, version, short content hash and path, and the diagnostics. **R** scans again. The hash is the first 12 hex digits of a stable FNV-1a digest of the `SKILL.md` bytes; it is for inspection only, not an integrity check.
 - `/skills disable NAME` and `/skills enable NAME` change the `disabled_skills` list in `settings.json`. Existing settings files without that key load unchanged, and the key is left out while the list is empty. If no settings file exists, the change lasts only for the current session.
 - Every owner request includes the compact metadata block, so the model knows which skills exist. The budget is 2,500 characters, kept small for local models. Only the selected skill's full instructions are added.
 - A skill never changes the tool list, approvals or denial handling. The owner still approves every command. A denial still ends the tool phase for that request when a skill is active.
@@ -51,14 +51,15 @@ Owner-installed skills win so that a cloned repository cannot silently replace a
 
 ### Bundled skills
 
-The repository's `skills/` directory holds the skills shipped with Bella: `linux-diagnostics` and `browser-check`. They are compiled into the binary. At startup the app writes them to `<data-dir>/bundled-skills/`, rewriting a file only when its content differs. That directory belongs to the app, and edits there are replaced. To change a bundled skill, copy its folder to `<data-dir>/skills/` and edit the copy: the `user` root wins, and the bundled copy shows as `Shadowed`. To turn one off, use `/skills disable NAME`. Nothing is downloaded. `browser-check` states that `open_browser` only asks the launcher to open a page and does not verify, read or control it. Only direct subdirectories of a root are examined. Hidden entries (`.name`) are skipped, as are plain files. There is no recursive traversal. A missing root is reported as `Missing` and is not an error.
+The repository's `skills/` directory holds the skills shipped with Bella: `linux-diagnostics`, `crash-investigation` and `browser-check`. They are compiled into the binary. At startup the app writes them to `<data-dir>/bundled-skills/`, rewriting a file only when its content differs. That directory belongs to the app, and edits there are replaced. To change a bundled skill, copy its folder to `<data-dir>/skills/` and edit the copy: the `user` root wins, and the bundled copy shows as `Shadowed`. To turn one off, use `/skills disable NAME`. Nothing is downloaded. Each bundled skill has “When to use” and “When not to use” examples. `browser-check` states that `open_browser` only asks the launcher to open a page and does not verify, read or control it. `crash-investigation` gathers read-only evidence (`journalctl`, `coredumpctl list`/`info`, `dmesg` tail, `ulimit -c`, app logs), never runs destructive commands, and never uses `sudo` unless the owner has been told why and has approved it. Only direct subdirectories of a root are examined. Hidden entries (`.name`) are skipped, as are plain files. There is no recursive traversal of the root. A missing root is reported as `Missing` and is not an error.
 
 **Duplicates:** the first valid skill with a given name, in root priority order, wins. Later copies are reported as `Shadowed` diagnostics that name the winning path. Within a root, names are unique because the name must match the directory.
 
 ## Two-level loading
 
-1. **Discovery** reads only the front matter of each `SKILL.md`, bounded in bytes, and returns metadata: name, description, root label, priority, canonical path and extra keys. Bodies are not read, so a malformed body does not affect discovery.
-2. **Load** (`Catalog::load`) reads one enabled skill in full when it is selected. It checks the file again and returns the instructions. If the name or description has changed on disk since discovery, it returns `ChangedOnDisk`. It also lists files up to two levels below the skill directory (for example `scripts/verify.sh`). These resources are only listed: the loader never reads or runs them. Running a script later must go through normal tool policy and owner approval.
+1. **Discovery** reads only the front matter of each `SKILL.md`, bounded in bytes, and returns metadata: name, description, root label, priority, canonical path, extra keys and a short content hash. A malformed body does not fail discovery (a non-UTF-8 body is ignored for reference checks and reported when the skill is loaded).
+2. **Load** (`Catalog::load`) reads one enabled skill in full when it is selected. It checks the file again and returns the instructions. If the name or description has changed on disk since discovery, it returns `ChangedOnDisk`. It also lists files up to two levels below the skill directory (for example `scripts/verify.sh`). These resources are only listed: the loader never executes them.
+3. **References and scripts** (warnings, the skill still loads and stays listed). Markdown links and bare paths under `references/` or `scripts/` (and relative `./` / `../` paths) are checked: a missing file is `MissingResource`, a path that leaves the skill directory is `ResourceEscapes`. Referenced markdown files may be followed, bounded by `max_ref_depth` (default 3, counting `SKILL.md` as 1) and `max_refs` (default 32). Hitting the count limit is `ResourceTraversalLimit`. Scripts (files under `scripts/` or ending in `.sh` / `.bash`) are reported as `UnreviewedScript`. A front-matter list of reviewed scripts would not be enough to trust them: the skill system never runs a script. Any later run must go through the normal shell tool policy and owner approval. These warnings are also shown among the `/skills` diagnostics.
 
 ## Limits (defaults)
 
@@ -73,6 +74,8 @@ The repository's `skills/` directory holds the skills shipped with Bella: `linux
 | Instructions | 32 KiB (checked at load) |
 | Extra front matter keys | 16 |
 | Listed resources | 64 |
+| Reference traversal depth (`SKILL.md` = 1) | 3 |
+| Distinct local references checked | 32 |
 
 Anything over a limit is reported as a diagnostic. When the per-root entry cap is hit, the entries kept depend on directory order. Discovery never panics: unreadable, non-UTF-8 or malformed files become diagnostics.
 
@@ -93,9 +96,8 @@ A message selects a skill only when it **starts** with `$name` followed by white
 
 ## Not done yet
 
-- No implicit selection, where the model chooses a skill from its description, and no trigger or non-trigger evaluation.
+- No implicit selection, where the model chooses a skill from its description, and no automatic trigger or non-trigger evaluation (the bundled skills document those examples for the owner and the model).
 - No skills for guests of lent bots.
-- No `crash-investigation` skill yet.
 - The active skill is not saved with the task record. It is visible only through the chat note and the status while the request runs.
-- Instructions that reference resources are not checked for missing files.
+- There is no separate “review this script before enabling the skill” gate: unreviewed scripts are diagnosed and still require ordinary shell approval if someone tries to run them.
 - No installer: copying a skill directory into a root is the only way to add one.
