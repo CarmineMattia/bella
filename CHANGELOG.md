@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — 2026-11-12
+
+- Skills slice 3. Bella now also ships `crash-investigation` (read-only logs and core-dump info, with “when to use” / “when not to use” examples; `linux-diagnostics` and `browser-check` got the same). `/skills` shows each skill's source, version, path and a short content hash. Missing or escaping local references are reported as diagnostics and the skill still loads. Scripts listed by a skill are marked unreviewed and are never executed by the skill system; running one still needs ordinary shell approval.
+
 ## Unreleased — 2026-11-11
 
 - Skills, explicit selection only. Start a request to your own agent with `$name` to add one skill's instructions to that request. A chat note and the header status show the active skill. An unknown or disabled name sends nothing and keeps your draft. `/skills` shows roots, enabled and disabled skills, versions and diagnostics. `/skills disable|enable NAME` is saved as an optional `disabled_skills` list in `settings.json`; older files load unchanged. Owner requests carry a compact metadata block of at most 2,500 characters. Skills never change tools, approvals or denial. Guests of lent bots never get skills. Bella ships `linux-diagnostics` and `browser-check` (installed to `<data-dir>/bundled-skills/`, lowest priority, overridable in `<data-dir>/skills/`).

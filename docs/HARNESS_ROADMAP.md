@@ -63,8 +63,8 @@ Acceptance: a chat-only policy advertises no execution tools and rejects fabrica
 
 - [x] Define a `SKILL.md` loader with name, concise description, instructions and optional local references/scripts. Declare compatibility with any chosen public skill specification only after testing it.
 - [x] Load names/descriptions first; read full instructions only when selected. Support explicit skill selection and show which skill is active.
-- [ ] Start with Linux diagnostics, crash investigation and browser-action verification. Add skills in response to recurring tasks, with clear trigger and non-trigger examples.
-- [ ] Make discovery roots, disabled skills, provenance and versions inspectable. Handle duplicate names, malformed front matter and missing resources predictably.
+- [x] Start with Linux diagnostics, crash investigation and browser-action verification. Add skills in response to recurring tasks, with clear trigger and non-trigger examples.
+- [x] Make discovery roots, disabled skills, provenance and versions inspectable. Handle duplicate names, malformed front matter and missing resources predictably.
 - [ ] Bound discovered metadata, instruction size and resource traversal. Review skill scripts before enabling them; running a script uses normal tool policy and approval.
 - [x] Keep installation explicit. Do not silently download Codex skills, install dependencies or give skills new permissions.
 
