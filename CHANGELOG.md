@@ -2,6 +2,7 @@
 
 ## Unreleased — 2026-11-12
 
+- Documented a planned computer-use phase (harness P6) in `docs/COMPUTER_USE.md`: controlled browser first, then an isolated Linux agent desktop with its own cursor, optional live takeover, and later Android. Codex and the public computer-use APIs are recorded as references; no computer-use code landed.
 - Skills slice 3. Bella now also ships `crash-investigation` (read-only logs and core-dump info, with “when to use” / “when not to use” examples; `linux-diagnostics` and `browser-check` got the same). `/skills` shows each skill's source, version, path and a short content hash. Missing or escaping local references are reported as diagnostics and the skill still loads. Scripts listed by a skill are marked unreviewed and are never executed by the skill system; running one still needs ordinary shell approval.
 
 ## Unreleased — 2026-11-11

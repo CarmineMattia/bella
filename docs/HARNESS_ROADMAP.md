@@ -1,8 +1,8 @@
 # Harness improvement roadmap
 
-Updated: 2026-11-10. Status: planned; the unchecked items below are not delivered features.
+Updated: 2026-11-12. Status: planned; the unchecked items below are not delivered features.
 
-Carmine's direction: improve execution reliability first, then skills and future integrations with other bot/agent interfaces. Use the public OpenAI Codex harness as a reference while preserving local inference and application-owned permissions. This document supplements `PLAN.md`; it does not replace the networking, identity, Android or release milestones.
+Carmine's direction: improve execution reliability first, then skills and future integrations with other bot/agent interfaces. Use the public OpenAI Codex harness as a reference while preserving local inference and application-owned permissions. This document supplements `PLAN.md`; it does not replace the networking, identity, Android or release milestones. Computer use is planned as P6 and is specified in [COMPUTER_USE.md](COMPUTER_USE.md); it is not a delivered capability.
 
 ## Baseline and coordination
 
@@ -81,6 +81,18 @@ Acceptance: explicit and implicit selection tests, negative trigger cases, malfo
 
 Acceptance: the same fake-backend scenarios pass for every adapter, including denial, unavailable capability, disconnect/reconnect, duplicated events and cancellation. A reconnect cannot duplicate execution; permissions remain bound to the original requester. Real-service tests are opt-in and report cost/access prerequisites.
 
+## P6 — Computer use (browser, isolated desktop, smartphone)
+
+Design: [COMPUTER_USE.md](COMPUTER_USE.md). Not started. Today's tools remain `shell` and `open_browser` (launch only). Codex is a product and API reference; Codex CLI does not provide computer use, and the ChatGPT desktop Computer Use feature is documented for macOS and Windows, not Linux. Bella's default on Wayland is an isolated agent session with its own cursor, not a second pointer on the owner's live seat.
+
+- [ ] CU1 — Controlled browser: Playwright with an isolated profile and no owner cookies by default; read the page accessibility tree and text; screenshot, navigate, click, type, fill, select and tabs; per-action or short-plan owner approval; structured tool results; honest behaviour when the local model has no vision.
+- [ ] CU2 — Isolated Linux agent desktop: a nested or headless session (own compositor and cursor) with a live view for the owner; full action catalogue (screenshot, zoom/region, move, click variants, drag, scroll, type, key/hotkey, hold, wait, cursor position, open app, window list/focus/resize, approved clipboard); AT-SPI first, screenshots and set-of-marks only when a vision-capable model is actually loaded; OCR fallback.
+- [ ] CU2-live — Optional takeover of the owner's live desktop, later and only with explicit consent (on GNOME: RemoteDesktop portal and libei). This shares the seat cursor; it is not a second system pointer. A kill switch is required. Do not fall back silently to ydotool.
+- [ ] CU3 — Smartphone use via the Android companion (AccessibilityService or ADB/Shizuku): tap, swipe, type, back, home, screenshot and accessibility dump. Depends on [PLAN.md](../PLAN.md) milestone 6; Termux alone cannot control other apps.
+- [ ] Safety and policy: owner approval per action or a bounded plan; domain and app allowlists; the bot never types secrets; stop/kill switch; inspectable action log; short screenshot retention with redaction hooks; screen, AT-SPI and clipboard content treated as untrusted; guests of lent bots never receive computer use until isolation and quotas exist. Final authorisation stays in the application, consistent with P5.
+
+Acceptance: fake-backend scenarios cover success, denial, cancellation, allowlist rejection, unavailable vision and guest exclusion. CU2 also shows that work in the agent session does not move the owner's live cursor. Checklists are ticked only after reviewed implementation and validation.
+
 ## Cross-cutting — Regressions and observable evidence
 
 - [ ] Establish a small, versioned task suite from actual failures: status versus upgrade, sudo authentication, launch versus page verification, denial, loop exhaustion, long context and restart.
@@ -100,3 +112,12 @@ Code references are pinned to the reviewed Codex revision `37103d7f01e82162472c6
 - [Compaction/checkpoint prompt](https://github.com/openai/codex/blob/37103d7f01e82162472c6fba7b4088d5a1303321/codex-rs/prompts/templates/compact/prompt.md).
 - [Embedded skill installation](https://github.com/openai/codex/blob/37103d7f01e82162472c6fba7b4088d5a1303321/codex-rs/skills/src/lib.rs) and [skill authoring guidance](https://learn.chatgpt.com/docs/build-skills).
 - [App-server implementation notes](https://github.com/openai/codex/blob/37103d7f01e82162472c6fba7b4088d5a1303321/codex-rs/app-server/README.md).
+
+Computer-use references (retrieved 2026-11-12; see [COMPUTER_USE.md](COMPUTER_USE.md) for how they apply):
+
+- [Codex / ChatGPT desktop Computer Use](https://learn.chatgpt.com/docs/computer-use) and [Browser](https://learn.chatgpt.com/docs/browser) (not available in Codex CLI or the IDE extension).
+- [Enterprise browser and Computer Use controls](https://help.openai.com/en/articles/20001510-manage-browser-and-computer-use-in-your-enterprise-workspace).
+- [OpenAI computer-use tool](https://developers.openai.com/api/docs/guides/tools-computer-use) and [browser/desktop drivers](https://developers.openai.com/api/docs/guides/tools-computer-use-sdk-drivers) (`pending_safety_checks`, `before_action`).
+- [Anthropic computer use tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool).
+- [Playwright MCP](https://playwright.dev/docs/getting-started-mcp).
+- [X11 MPX](https://www.x.org/Development/Documentation/MPX/), [wlr virtual pointer](https://wayland.app/protocols/wlr-virtual-pointer-unstable-v1), [xdg-desktop-portal RemoteDesktop](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop), [AT-SPI2](https://www.freedesktop.org/wiki/Accessibility/AT-SPI2/).

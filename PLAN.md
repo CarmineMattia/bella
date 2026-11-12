@@ -32,7 +32,7 @@ Onboarding, participant discovery, launcher-owned model lifecycle and durable ta
 
 ## Next milestones
 
-Harness improvement roadmap (ChatGPT, planned; not delivered): see [docs/HARNESS_ROADMAP.md](docs/HARNESS_ROADMAP.md).
+Harness improvement roadmap (planned; not delivered): see [docs/HARNESS_ROADMAP.md](docs/HARNESS_ROADMAP.md). Computer use is harness phase P6 (browser, then an isolated Linux agent desktop with its own cursor, then optional live takeover, then smartphone): see [docs/COMPUTER_USE.md](docs/COMPUTER_USE.md). Smartphone use depends on milestone 6 and does not replace it.
 
 1. Gather alpha feedback and harden usability: grapheme editing, large-history memory bounds, authenticated model endpoints, hardware-aware model setup and additional terminal platforms. Durable task scheduling/replay remains a separate design decision requiring explicit authorization semantics.
 2. Evaluate Pi against the initial agent adapter using the same model and tasks. Retain application-owned tool permissions and prevent bypass through unrestricted built-in tools or extensions.
